@@ -20,7 +20,7 @@ services:
       - key: SMTP_PASSWORD
         sync: false
       - key: OMNIA_AUTH_BASE_URL
-        value: https://auth.omniametadata.com
+        value: https://omnia-metadata-auth-api.onrender.com
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
