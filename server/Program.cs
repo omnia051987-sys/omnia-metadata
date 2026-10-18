@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Net.Mail;
 using System.Security.Cryptography;
+using MailKit.Security;
+using MimeKit;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<TokenStore>();
@@ -14,19 +16,10 @@ app.MapPost("/auth/request-confirmation", async (ConfirmationRequest req, TokenS
     var token = store.Create(req.Email);
     var baseUrl = Environment.GetEnvironmentVariable("OMNIA_AUTH_BASE_URL") ?? "https://auth.omniametadata.com";
     var link = $"{baseUrl}/auth/confirm?token={Uri.EscapeDataString(token)}";
-    try
-    {
-        await mailer.SendAsync(req.Email.Trim(), link).WaitAsync(TimeSpan.FromSeconds(15));
-    }
-    catch (TimeoutException)
-    {
-        return Results.Problem("O provedor de hospedagem não concluiu a conexão SMTP dentro do prazo.", statusCode: 503);
-    }
-    catch (SmtpException ex)
-    {
-        return Results.Problem($"Falha SMTP: {ex.StatusCode}", statusCode: 502);
-    }
-    return Results.Accepted(value: new { message = "Solicitação registrada. Verifique seu e-mail para confirmar a conta.", sender = mailer.From });
+    try { await mailer.SendAsync(req.Email.Trim(), link).WaitAsync(TimeSpan.FromSeconds(15)); }
+    catch (TimeoutException) { return Results.Problem("Timeout na conexão SMTP.", statusCode: 503); }
+    catch (Exception ex) { return Results.Problem($"Falha SMTP: {ex.GetType().Name}", statusCode: 502); }
+    return Results.Accepted(value: new { message = "Solicitação registrada. Verifique seu e-mail.", sender = mailer.From });
 });
 app.MapGet("/auth/confirm", (string token, TokenStore store) => store.Consume(token) is string email ? Results.Ok(new { confirmed = true, email }) : Results.BadRequest(new { confirmed = false, error = "Token inválido, expirado ou já utilizado." }));
 app.MapPost("/auth/revoke", (RevokeRequest req, TokenStore store) => { store.Revoke(req.SessionId); return Results.NoContent(); });
@@ -42,17 +35,20 @@ sealed class SmtpConfirmationSender
     public async Task SendAsync(string recipient, string link)
     {
         var host = Environment.GetEnvironmentVariable("SMTP_HOST") ?? "smtp.gmail.com";
-        var port = int.TryParse(Environment.GetEnvironmentVariable("SMTP_PORT"), out var p) ? p : 587;
+        var port = int.TryParse(Environment.GetEnvironmentVariable("SMTP_PORT"), out var p) ? p : 465;
         var user = Environment.GetEnvironmentVariable("SMTP_USER") ?? From;
         var password = Environment.GetEnvironmentVariable("SMTP_PASSWORD");
-        if (string.IsNullOrWhiteSpace(password)) throw new InvalidOperationException("SMTP_PASSWORD não configurado no servidor.");
-        using var client = new SmtpClient(host, port) { EnableSsl = true, Credentials = new System.Net.NetworkCredential(user, password) };
-        using var message = new MailMessage(From, recipient)
-        {
-            Subject = "Confirme seu e-mail — Omnia Metadata",
-            Body = $"Olá,\n\nConfirme sua conta no Omnia Metadata pelo link abaixo:\n\n{link}\n\nEste link expira em 24 horas.\n\nOmnia Metadata"
-        };
-        await client.SendMailAsync(message);
+        if (string.IsNullOrWhiteSpace(password)) throw new InvalidOperationException("SMTP_PASSWORD não configurado.");
+        var message = new MimeMessage();
+        message.From.Add(MailboxAddress.Parse(From));
+        message.To.Add(MailboxAddress.Parse(recipient));
+        message.Subject = "Confirme seu e-mail — Omnia Metadata";
+        message.Body = new TextPart("plain") { Text = $"Olá,\n\nConfirme sua conta pelo link abaixo:\n\n{link}\n\nEste link expira em 24 horas.\n\nOmnia Metadata" };
+        using var client = new MailKit.Net.Smtp.SmtpClient();
+        await client.ConnectAsync(host, port, port == 465 ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTls);
+        await client.AuthenticateAsync(user, password);
+        await client.SendAsync(message);
+        await client.DisconnectAsync(true);
     }
 }
 
