@@ -23,7 +23,7 @@ public sealed class LoginForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 9,
+            RowCount = 8,
             Padding = new Padding(32, 26, 32, 24),
             BackColor = Color.White
         };
@@ -33,7 +33,6 @@ public sealed class LoginForm : Form
         layout.RowStyles.Add(new(SizeType.Absolute, 42));
         layout.RowStyles.Add(new(SizeType.Absolute, 44));
         layout.RowStyles.Add(new(SizeType.Absolute, 44));
-        layout.RowStyles.Add(new(SizeType.Absolute, 42));
         layout.RowStyles.Add(new(SizeType.Absolute, 42));
         layout.RowStyles.Add(new(SizeType.Percent, 100));
 
@@ -63,10 +62,6 @@ public sealed class LoginForm : Form
 
         var google = Provider("Continuar com Google");
         google.Click += async (_, _) => await ProviderLogin(google, "google", "Google");
-        var github = Provider("Continuar com GitHub");
-        github.Click += async (_, _) => await ProviderLogin(github, "github", "GitHub");
-        var microsoft = Provider("Continuar com Microsoft");
-        microsoft.Click += async (_, _) => await ProviderLogin(microsoft, "microsoft", "Microsoft");
 
         var providerTitle = new Label
         {
@@ -84,16 +79,6 @@ public sealed class LoginForm : Form
         layout.Controls.Add(create, 0, 5);
         layout.Controls.Add(providerTitle, 0, 6);
         layout.Controls.Add(google, 0, 7);
-
-        var otherProviders = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            Margin = new Padding(0),
-            Controls = { github, microsoft }
-        };
-        layout.Controls.Add(otherProviders, 0, 8);
         Controls.Add(layout);
         AcceptButton = emailLogin;
     }
