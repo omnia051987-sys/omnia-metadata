@@ -25,3 +25,7 @@ services:
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
+      - key: OMNIA_D1_STORE_URL
+        value: https://omnia-metadata-auth.leohighway.workers.dev
+      - key: OMNIA_D1_STORE_SECRET
+        sync: false

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Net.Mail;
 using System.Security.Cryptography;
 using System.Text;
@@ -10,6 +11,7 @@ using MimeKit;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
+builder.Services.AddHttpClient<D1SessionStore>();
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -139,6 +141,7 @@ app.MapGet("/auth/google/callback", async (
     IHttpClientFactory clients,
     AuthSessionStore sessions,
     DesktopTicketStore desktopTickets,
+    D1SessionStore durable,
     string? code,
     string? state,
     string? error) =>
@@ -212,6 +215,8 @@ app.MapGet("/auth/google/callback", async (
 
         var role = IsOwnerEmail(email) ? "owner" : "user";
         var session = sessions.Create(email, subject, role);
+        if (!await durable.CreateAsync(session, "google"))
+            return Results.Problem("Não foi possível persistir a sessão com segurança.", statusCode: 503);
         http.Response.Cookies.Append("omnia_session", session.Token, new CookieOptions
         {
             HttpOnly = true,
@@ -265,10 +270,16 @@ app.MapPost("/auth/desktop/exchange", (DesktopTicketRequest? req, DesktopTicketS
     });
 }).RequireRateLimiting("auth");
 
-app.MapGet("/auth/me", (HttpContext http, AuthSessionStore sessions) =>
+app.MapGet("/auth/me", async (HttpContext http, AuthSessionStore sessions, D1SessionStore durable) =>
 {
-    if (!http.Request.Cookies.TryGetValue("omnia_session", out var token) || !sessions.TryGet(token, out var session))
+    if (!http.Request.Cookies.TryGetValue("omnia_session", out var token))
         return Results.Unauthorized();
+
+    if (!sessions.TryGet(token, out var session))
+    {
+        session = await durable.GetAsync(token);
+        if (session is null) return Results.Unauthorized();
+    }
 
     return Results.Ok(new
     {
@@ -279,20 +290,30 @@ app.MapGet("/auth/me", (HttpContext http, AuthSessionStore sessions) =>
     });
 }).RequireRateLimiting("auth");
 
-app.MapPost("/auth/logout", (HttpContext http, AuthSessionStore sessions) =>
+app.MapPost("/auth/logout", async (HttpContext http, AuthSessionStore sessions, D1SessionStore durable) =>
 {
     if (http.Request.Cookies.TryGetValue("omnia_session", out var token))
+    {
         sessions.Revoke(token);
+        await durable.RevokeAsync(token);
+    }
     http.Response.Cookies.Delete("omnia_session");
     return Results.NoContent();
 }).RequireRateLimiting("auth");
 
-app.MapPost("/auth/revoke", (HttpContext http, AuthSessionStore sessions) =>
+app.MapPost("/auth/revoke", async (HttpContext http, AuthSessionStore sessions, D1SessionStore durable) =>
 {
-    if (!http.Request.Cookies.TryGetValue("omnia_session", out var token) || !sessions.TryGet(token, out _))
+    if (!http.Request.Cookies.TryGetValue("omnia_session", out var token) || string.IsNullOrWhiteSpace(token))
         return Results.Unauthorized();
 
+    if (!sessions.TryGet(token, out _))
+    {
+        var remote = await durable.GetAsync(token);
+        if (remote is null) return Results.Unauthorized();
+    }
+
     sessions.Revoke(token);
+    await durable.RevokeAsync(token);
     http.Response.Cookies.Delete("omnia_session");
     return Results.NoContent();
 }).RequireRateLimiting("auth");
@@ -416,5 +437,70 @@ sealed class DesktopTicketStore
 
         sessionToken = string.Empty;
         return false;
+    }
+}
+
+sealed class D1SessionStore
+{
+    readonly HttpClient client;
+    readonly string? baseUrl = Environment.GetEnvironmentVariable("OMNIA_D1_STORE_URL")?.TrimEnd('/');
+    readonly string? secret = Environment.GetEnvironmentVariable("OMNIA_D1_STORE_SECRET");
+
+    public D1SessionStore(HttpClient client) => this.client = client;
+    bool Enabled => !string.IsNullOrWhiteSpace(baseUrl) && !string.IsNullOrWhiteSpace(secret);
+
+    public async Task<bool> CreateAsync(AuthSession session, string provider)
+    {
+        if (!Enabled) return true;
+        using var request = NewRequest("/internal/session/create", new
+        {
+            token = session.Token,
+            email = session.Email,
+            subject = session.Subject,
+            provider,
+            role = session.Role,
+            expiresUtc = session.ExpiresUtc
+        });
+        try { using var response = await client.SendAsync(request); return response.IsSuccessStatusCode; }
+        catch (HttpRequestException) { return false; }
+    }
+
+    public async Task<AuthSession?> GetAsync(string token)
+    {
+        if (!Enabled) return null;
+        using var request = NewRequest("/internal/session/get", new { token });
+        try
+        {
+            using var response = await client.SendAsync(request);
+            if (!response.IsSuccessStatusCode) return null;
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var root = json.RootElement;
+            if (!root.TryGetProperty("authenticated", out var authenticated) || !authenticated.GetBoolean()) return null;
+            return new AuthSession(
+                token,
+                root.GetProperty("email").GetString()!,
+                string.Empty,
+                root.GetProperty("role").GetString()!,
+                root.GetProperty("expiresUtc").GetDateTime());
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or FormatException) { return null; }
+    }
+
+    public async Task RevokeAsync(string token)
+    {
+        if (!Enabled) return;
+        using var request = NewRequest("/internal/session/revoke", new { token });
+        try { using var _ = await client.SendAsync(request); }
+        catch (HttpRequestException) { }
+    }
+
+    HttpRequestMessage NewRequest(string path, object body)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, baseUrl + path)
+        {
+            Content = JsonContent.Create(body)
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", secret);
+        return request;
     }
 }
