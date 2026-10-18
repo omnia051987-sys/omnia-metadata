@@ -1,9 +1,15 @@
+using System.Drawing.Drawing2D;
+
 namespace Omnia.Metadata.App;
 
 public sealed class LoginForm : Form
 {
     public string AuthenticatedEmail { get; private set; } = string.Empty;
     public string SessionToken { get; private set; } = string.Empty;
+    public string Role { get; private set; } = "user";
+    public string Plan { get; private set; } = "free";
+    public int MonthlyFreeQueriesUsed { get; private set; }
+    public int OneOffQueriesAvailable { get; private set; }
 
     readonly TextBox email = new() { PlaceholderText = "E-mail", Dock = DockStyle.Fill };
     readonly TextBox password = new() { PlaceholderText = "Senha", UseSystemPasswordChar = true, Dock = DockStyle.Fill };
@@ -61,6 +67,9 @@ public sealed class LoginForm : Form
         create.Click += (_, _) => { using var form = new CreateAccountForm(); form.ShowDialog(this); };
 
         var google = Provider("Continuar com Google");
+        google.Image = CreateGoogleIcon();
+        google.ImageAlign = ContentAlignment.MiddleLeft;
+        google.TextImageRelation = TextImageRelation.ImageBeforeText;
         google.Click += async (_, _) => await ProviderLogin(google, "google", "Google");
 
         var providerTitle = new Label
@@ -91,6 +100,25 @@ public sealed class LoginForm : Form
         FlatStyle = FlatStyle.System
     };
 
+    static Bitmap CreateGoogleIcon()
+    {
+        var icon = new Bitmap(18, 18);
+        using var graphics = Graphics.FromImage(icon);
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        graphics.Clear(Color.Transparent);
+        using var red = new Pen(Color.FromArgb(234, 67, 53), 3);
+        using var yellow = new Pen(Color.FromArgb(251, 188, 5), 3);
+        using var green = new Pen(Color.FromArgb(52, 168, 83), 3);
+        using var blue = new Pen(Color.FromArgb(66, 133, 244), 3);
+        var bounds = new Rectangle(2, 2, 14, 14);
+        graphics.DrawArc(red, bounds, 205, 75);
+        graphics.DrawArc(yellow, bounds, 125, 75);
+        graphics.DrawArc(green, bounds, 35, 75);
+        graphics.DrawArc(blue, bounds, 300, 65);
+        graphics.DrawLine(blue, 9, 9, 16, 9);
+        return icon;
+    }
+
     static Button Provider(string text) => new()
     {
         Text = text,
@@ -114,6 +142,10 @@ public sealed class LoginForm : Form
             var result = await auth.SignInWithPasswordAsync(email.Text.Trim(), password.Text);
             AuthenticatedEmail = result.Email;
             SessionToken = result.SessionToken;
+            Role = result.Role;
+            Plan = result.Plan;
+            MonthlyFreeQueriesUsed = result.MonthlyFreeQueriesUsed;
+            OneOffQueriesAvailable = result.OneOffQueriesAvailable;
             DialogResult = DialogResult.OK;
             Close();
         }
@@ -136,6 +168,10 @@ public sealed class LoginForm : Form
             var result = await auth.SignInWithProviderAsync(provider);
             AuthenticatedEmail = result.Email;
             SessionToken = result.SessionToken;
+            Role = result.Role;
+            Plan = result.Plan;
+            MonthlyFreeQueriesUsed = result.MonthlyFreeQueriesUsed;
+            OneOffQueriesAvailable = result.OneOffQueriesAvailable;
             DialogResult = DialogResult.OK;
             Close();
         }

@@ -19,6 +19,7 @@ var index_default = {
       if (url.pathname === "/internal/confirmation/consume") return consumeConfirmation(request, env);
       if (url.pathname === "/internal/password/register") return registerPassword(request, env);
       if (url.pathname === "/internal/password/get") return getPassword(request, env);
+      if (url.pathname === "/internal/entitlements/get") return getEntitlements(request, env);
       return Response.json({ error: "N\xE3o encontrado." }, { status: 404 });
     } catch (error) {
       console.error("D1 auth store error", error);
@@ -40,6 +41,12 @@ async function createSession(request, env) {
     env.DB.prepare(`INSERT INTO identities (provider, provider_subject, user_id, created_at)
       VALUES (?, ?, ?, ?)
       ON CONFLICT(provider, provider_subject) DO UPDATE SET user_id = excluded.user_id`).bind(input.provider, input.subject, userId, now),
+    env.DB.prepare(`INSERT INTO entitlements
+      (user_id, plan, monthly_free_queries_used, one_off_queries_available, updated_at)
+      VALUES (?, ?, 0, 0, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        plan = CASE WHEN entitlements.plan = 'owner' OR excluded.plan = 'owner' THEN 'owner' ELSE entitlements.plan END,
+        updated_at = excluded.updated_at`).bind(userId, input.role === "owner" ? "owner" : "free", now),
     env.DB.prepare(`INSERT OR REPLACE INTO auth_sessions (token_hash, user_id, provider, expires_at, revoked_at, created_at)
       VALUES (?, ?, ?, ?, NULL, ?)`).bind(tokenHash, userId, input.provider, input.expiresUtc, now)
   ]);
@@ -112,7 +119,13 @@ async function registerPassword(request, env) {
         updated_at = excluded.updated_at`).bind(userId, email, role, now, now),
     env.DB.prepare(`INSERT INTO password_credentials
       (user_id, hash_b64, salt_b64, iterations, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)`).bind(userId, input.hashB64, input.saltB64, input.iterations, now, now)
+      VALUES (?, ?, ?, ?, ?, ?)`).bind(userId, input.hashB64, input.saltB64, input.iterations, now, now),
+    env.DB.prepare(`INSERT INTO entitlements
+      (user_id, plan, monthly_free_queries_used, one_off_queries_available, updated_at)
+      VALUES (?, ?, 0, 0, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        plan = CASE WHEN entitlements.plan = 'owner' OR excluded.plan = 'owner' THEN 'owner' ELSE entitlements.plan END,
+        updated_at = excluded.updated_at`).bind(userId, role, now)
   ]);
   return Response.json({ ok: true, email, role });
 }
@@ -128,6 +141,34 @@ async function getPassword(request, env) {
   return Response.json({ email: row.email, role: row.role, hashB64: row.hash_b64, saltB64: row.salt_b64, iterations: row.iterations });
 }
 __name(getPassword, "getPassword");
+async function getEntitlements(request, env) {
+  const input = await request.json();
+  if (!input.email) return Response.json({ error: "E-mail n\xE3o informado." }, { status: 400 });
+  const email = input.email.trim().toLowerCase();
+  const row = await env.DB.prepare(`SELECT u.id, u.role,
+      COALESCE(e.plan, CASE WHEN u.role = 'owner' THEN 'owner' ELSE 'free' END) AS plan,
+      COALESCE(e.monthly_free_queries_used, 0) AS monthly_free_queries_used,
+      COALESCE(e.one_off_queries_available, 0) AS one_off_queries_available
+    FROM users u LEFT JOIN entitlements e ON e.user_id = u.id
+    WHERE u.email = ?`).bind(email).first();
+  if (!row) return Response.json({ plan: "free", monthlyFreeQueriesUsed: 0, oneOffQueriesAvailable: 0, purchases: [] });
+  const purchases = await env.DB.prepare(`SELECT provider, provider_purchase_id, product_id, status, purchased_at, expires_at
+    FROM purchases WHERE user_id = ? ORDER BY purchased_at DESC`).bind(row.id).all();
+  return Response.json({
+    plan: row.plan,
+    monthlyFreeQueriesUsed: row.monthly_free_queries_used,
+    oneOffQueriesAvailable: row.one_off_queries_available,
+    purchases: (purchases.results ?? []).map((purchase) => ({
+      provider: purchase.provider,
+      purchaseId: purchase.provider_purchase_id,
+      productId: purchase.product_id,
+      status: purchase.status,
+      purchasedAt: purchase.purchased_at,
+      expiresAt: purchase.expires_at
+    }))
+  });
+}
+__name(getEntitlements, "getEntitlements");
 function isOwnerEmail(email) {
   return ["leohighway@gmail.com", "leonardolimabravo@hotmail.com", "omnia051987@gmail.com"].includes(email.toLowerCase());
 }

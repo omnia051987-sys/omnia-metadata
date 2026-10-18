@@ -6,7 +6,24 @@ using System.Text.Json;
 
 namespace Omnia.Metadata.App;
 
-public sealed record AuthResult(string Email, string Role, string SessionToken, DateTime ExpiresUtc, string Provider);
+public sealed record AuthResult(
+    string Email,
+    string Role,
+    string SessionToken,
+    DateTime ExpiresUtc,
+    string Provider,
+    string Plan = "free",
+    int MonthlyFreeQueriesUsed = 0,
+    int OneOffQueriesAvailable = 0,
+    PurchaseSummary[]? Purchases = null);
+
+public sealed record PurchaseSummary(
+    string Provider,
+    string PurchaseId,
+    string ProductId,
+    string Status,
+    string PurchasedAt,
+    string? ExpiresAt);
 
 public sealed class AuthClient
 {

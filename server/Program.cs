@@ -93,6 +93,7 @@ app.MapPost("/auth/password/login", async (
     var session = sessions.Create(email, $"password:{email}", credential.Role);
     if (!await durable.CreateAsync(session, "password"))
         return Results.Problem("Não foi possível persistir a sessão com segurança.", statusCode: 503);
+    var entitlement = await ResolveEntitlementAsync(durable, email, credential.Role);
     http.Response.Cookies.Append("omnia_session", session.Token, new CookieOptions
     {
         HttpOnly = true,
@@ -101,7 +102,19 @@ app.MapPost("/auth/password/login", async (
         MaxAge = TimeSpan.FromHours(8),
         IsEssential = true
     });
-    return Results.Ok(new { authenticated = true, provider = "password", email, role = credential.Role, sessionToken = session.Token, expiresUtc = session.ExpiresUtc });
+    return Results.Ok(new
+    {
+        authenticated = true,
+        provider = "password",
+        email,
+        role = credential.Role,
+        plan = entitlement.Plan,
+        monthlyFreeQueriesUsed = entitlement.MonthlyFreeQueriesUsed,
+        oneOffQueriesAvailable = entitlement.OneOffQueriesAvailable,
+        purchases = entitlement.Purchases,
+        sessionToken = session.Token,
+        expiresUtc = session.ExpiresUtc
+    });
 }).RequireRateLimiting("auth");
 
 app.MapGet("/auth/google", (HttpContext http, string? return_uri) =>
@@ -235,6 +248,7 @@ app.MapGet("/auth/google/callback", async (
         var session = sessions.Create(email, subject, role);
         if (!await durable.CreateAsync(session, "google"))
             return Results.Problem("Não foi possível persistir a sessão com segurança.", statusCode: 503);
+        var entitlement = await ResolveEntitlementAsync(durable, email, role);
         http.Response.Cookies.Append("omnia_session", session.Token, new CookieOptions
         {
             HttpOnly = true,
@@ -256,6 +270,10 @@ app.MapGet("/auth/google/callback", async (
             provider = "google",
             email,
             role,
+            plan = entitlement.Plan,
+            monthlyFreeQueriesUsed = entitlement.MonthlyFreeQueriesUsed,
+            oneOffQueriesAvailable = entitlement.OneOffQueriesAvailable,
+            purchases = entitlement.Purchases,
             expiresUtc = session.ExpiresUtc
         });
     }
@@ -269,7 +287,7 @@ app.MapGet("/auth/google/callback", async (
     }
 }).RequireRateLimiting("auth");
 
-app.MapPost("/auth/desktop/exchange", (DesktopTicketRequest? req, DesktopTicketStore desktopTickets, AuthSessionStore sessions) =>
+app.MapPost("/auth/desktop/exchange", async (DesktopTicketRequest? req, DesktopTicketStore desktopTickets, AuthSessionStore sessions, D1SessionStore durable) =>
 {
     if (req is null || string.IsNullOrWhiteSpace(req.Ticket))
         return Results.BadRequest(new { authenticated = false, error = "Ticket não informado." });
@@ -277,6 +295,7 @@ app.MapPost("/auth/desktop/exchange", (DesktopTicketRequest? req, DesktopTicketS
     if (!desktopTickets.Consume(req.Ticket, out var sessionToken, out var provider) || !sessions.TryGet(sessionToken, out var session))
         return Results.Unauthorized();
 
+    var entitlement = await ResolveEntitlementAsync(durable, session.Email, session.Role);
     return Results.Ok(new
     {
         authenticated = true,
@@ -284,6 +303,10 @@ app.MapPost("/auth/desktop/exchange", (DesktopTicketRequest? req, DesktopTicketS
         sessionToken,
         session.Email,
         session.Role,
+        plan = entitlement.Plan,
+        monthlyFreeQueriesUsed = entitlement.MonthlyFreeQueriesUsed,
+        oneOffQueriesAvailable = entitlement.OneOffQueriesAvailable,
+        purchases = entitlement.Purchases,
         session.ExpiresUtc
     });
 }).RequireRateLimiting("auth");
@@ -299,11 +322,16 @@ app.MapGet("/auth/me", async (HttpContext http, AuthSessionStore sessions, D1Ses
         if (session is null) return Results.Unauthorized();
     }
 
+    var entitlement = await ResolveEntitlementAsync(durable, session.Email, session.Role);
     return Results.Ok(new
     {
         authenticated = true,
         session.Email,
         session.Role,
+        plan = entitlement.Plan,
+        monthlyFreeQueriesUsed = entitlement.MonthlyFreeQueriesUsed,
+        oneOffQueriesAvailable = entitlement.OneOffQueriesAvailable,
+        purchases = entitlement.Purchases,
         session.ExpiresUtc
     });
 }).RequireRateLimiting("auth");
@@ -512,6 +540,7 @@ app.MapGet("/auth/{provider}/callback", async (
         var session = sessions.Create(email, subject, role);
         if (!await durable.CreateAsync(session, provider))
             return Results.Problem("Não foi possível persistir a sessão com segurança.", statusCode: 503);
+        var entitlement = await ResolveEntitlementAsync(durable, email, role);
         http.Response.Cookies.Append("omnia_session", session.Token, new CookieOptions
         {
             HttpOnly = true,
@@ -527,7 +556,18 @@ app.MapGet("/auth/{provider}/callback", async (
             return Results.Redirect($"{desktopReturnUri}?ticket={Uri.EscapeDataString(ticket)}");
         }
 
-        return Results.Ok(new { authenticated = true, provider, email, role, expiresUtc = session.ExpiresUtc });
+        return Results.Ok(new
+        {
+            authenticated = true,
+            provider,
+            email,
+            role,
+            plan = entitlement.Plan,
+            monthlyFreeQueriesUsed = entitlement.MonthlyFreeQueriesUsed,
+            oneOffQueriesAvailable = entitlement.OneOffQueriesAvailable,
+            purchases = entitlement.Purchases,
+            expiresUtc = session.ExpiresUtc
+        });
     }
     catch (JsonException)
     {
@@ -543,6 +583,12 @@ app.Run();
 static bool IsOwnerEmail(string email) => email.Equals("leohighway@gmail.com", StringComparison.OrdinalIgnoreCase)
     || email.Equals("leonardolimabravo@hotmail.com", StringComparison.OrdinalIgnoreCase)
     || email.Equals("omnia051987@gmail.com", StringComparison.OrdinalIgnoreCase);
+
+static async Task<EntitlementData> ResolveEntitlementAsync(D1SessionStore durable, string email, string role)
+{
+    return await durable.GetEntitlementsAsync(email)
+        ?? new EntitlementData(role.Equals("owner", StringComparison.OrdinalIgnoreCase) ? "owner" : "free", 0, 0, Array.Empty<PurchaseSummary>());
+}
 
 static string GetGoogleRedirectUri()
 {
@@ -621,6 +667,8 @@ record DesktopTicketRequest(string Ticket);
 record PasswordRegistrationRequest(string Email, string Password);
 record PasswordLoginRequest(string Email, string Password);
 sealed record PasswordCredentialData(string HashB64, string SaltB64, int Iterations, string Role);
+sealed record PurchaseSummary(string Provider, string PurchaseId, string ProductId, string Status, string PurchasedAt, string? ExpiresAt);
+sealed record EntitlementData(string Plan, int MonthlyFreeQueriesUsed, int OneOffQueriesAvailable, IReadOnlyList<PurchaseSummary> Purchases);
 
 enum PasswordRegistrationStatus
 {
@@ -852,6 +900,36 @@ sealed class D1SessionStore
                 root.GetProperty("role").GetString()!);
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or KeyNotFoundException or FormatException)
+        {
+            return null;
+        }
+    }
+
+    public async Task<EntitlementData?> GetEntitlementsAsync(string email)
+    {
+        if (!IsEnabled) return null;
+        using var request = NewRequest("/internal/entitlements/get", new { email });
+        try
+        {
+            using var response = await client.SendAsync(request);
+            if (!response.IsSuccessStatusCode) return null;
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var root = json.RootElement;
+            return new EntitlementData(
+                root.GetProperty("plan").GetString() ?? "free",
+                root.GetProperty("monthlyFreeQueriesUsed").GetInt32(),
+                root.GetProperty("oneOffQueriesAvailable").GetInt32(),
+                root.TryGetProperty("purchases", out var rawPurchases) && rawPurchases.ValueKind == JsonValueKind.Array
+                    ? rawPurchases.EnumerateArray().Select(purchase => new PurchaseSummary(
+                        purchase.GetProperty("provider").GetString() ?? string.Empty,
+                        purchase.GetProperty("purchaseId").GetString() ?? string.Empty,
+                        purchase.GetProperty("productId").GetString() ?? string.Empty,
+                        purchase.GetProperty("status").GetString() ?? string.Empty,
+                        purchase.GetProperty("purchasedAt").GetString() ?? string.Empty,
+                        purchase.TryGetProperty("expiresAt", out var expiresAt) && expiresAt.ValueKind != JsonValueKind.Null ? expiresAt.GetString() : null)).ToArray()
+                    : Array.Empty<PurchaseSummary>());
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or KeyNotFoundException)
         {
             return null;
         }

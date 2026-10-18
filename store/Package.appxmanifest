@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         IgnorableNamespaces="uap">
+  <!-- Replace the Identity Name and Publisher with the values assigned by Partner Center before submission. -->
+  <Identity Name="OmniaMetadata" Publisher="CN=Omnia Metadata" Version="0.7.1.0" />
+  <Properties>
+    <DisplayName>Omnia Metadata</DisplayName>
+    <PublisherDisplayName>Omnia Metadata</PublisherDisplayName>
+    <Description>Análise técnica local de metadados e integridade de arquivos.</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="pt-BR" />
+  </Resources>
+  <Applications>
+    <Application Id="App" Executable="Omnia.Metadata.App.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Omnia Metadata"
+        Description="Análise técnica local de metadados e integridade de arquivos."
+        BackgroundColor="#152D5A"
+        Square44x44Logo="Assets\Square44x44Logo.png"
+        Square150x150Logo="Assets\Square150x150Logo.png" />
+    </Application>
+  </Applications>
+</Package>
