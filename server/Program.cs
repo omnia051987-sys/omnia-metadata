@@ -64,7 +64,8 @@ app.MapGet("/auth/google", (HttpContext http) =>
     {
         HttpOnly = true,
         Secure = true,
-        SameSite = SameSiteMode.Lax,
+        SameSite = SameSiteMode.None,
+        Path = "/",
         MaxAge = TimeSpan.FromMinutes(10),
         IsEssential = true
     });
@@ -104,6 +105,12 @@ app.MapGet("/auth/google/callback", async (
         && CryptographicOperations.FixedTimeEquals(
             Encoding.UTF8.GetBytes(state),
             Encoding.UTF8.GetBytes(expectedState));
+
+    app.Logger.LogInformation(
+        "OAuth Google state validation: queryPresent={QueryPresent}, cookiePresent={CookiePresent}, match={Match}",
+        !string.IsNullOrWhiteSpace(state),
+        !string.IsNullOrWhiteSpace(expectedState),
+        stateMatches);
 
     if (string.IsNullOrWhiteSpace(code) || !stateMatches)
         return Results.BadRequest(new { authenticated = false, error = "Estado OAuth inválido, expirado ou já utilizado." });
