@@ -4,21 +4,50 @@ using System.Net.Mail;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 using MailKit.Security;
 using MimeKit;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("auth", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 30,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+});
 builder.Services.AddSingleton<TokenStore>();
 builder.Services.AddSingleton<SmtpConfirmationSender>();
 builder.Services.AddSingleton<AuthSessionStore>();
 
 var app = builder.Build();
+app.UseRateLimiter();
+app.Use(async (context, next) =>
+{
+    var isAuthRequest = context.Request.Path.StartsWithSegments("/auth");
+    if (isAuthRequest)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers.Pragma = "no-cache";
+    }
+
+    await next();
+});
 
 app.MapGet("/health", () => Results.Ok(new { service = "omnia-auth", status = "ok", utc = DateTime.UtcNow }));
 
-app.MapPost("/auth/request-confirmation", async (ConfirmationRequest req, TokenStore store, SmtpConfirmationSender mailer) =>
+app.MapPost("/auth/request-confirmation", async (ConfirmationRequest? req, TokenStore store, SmtpConfirmationSender mailer) =>
 {
+    if (req is null || string.IsNullOrWhiteSpace(req.Email) || req.Email.Length > 320)
+        return Results.BadRequest(new { error = "Informe um e-mail válido." });
+
     try { _ = new MailAddress(req.Email); }
     catch { return Results.BadRequest(new { error = "E-mail inválido." }); }
 
@@ -44,12 +73,15 @@ app.MapPost("/auth/request-confirmation", async (ConfirmationRequest req, TokenS
         message = "Solicitação registrada. Verifique seu e-mail.",
         sender = mailer.From
     });
-});
+}).RequireRateLimiting("auth");
 
-app.MapGet("/auth/confirm", (string token, TokenStore store) =>
-    store.Consume(token) is string email
-        ? Results.Ok(new { confirmed = true, email })
-        : Results.BadRequest(new { confirmed = false, error = "Token inválido, expirado ou já utilizado." }));
+app.MapGet("/auth/confirm", (string? token, TokenStore store) =>
+    string.IsNullOrWhiteSpace(token)
+        ? Results.BadRequest(new { confirmed = false, error = "Token não informado." })
+        : store.Consume(token) is string email
+            ? Results.Ok(new { confirmed = true, email })
+            : Results.BadRequest(new { confirmed = false, error = "Token inválido, expirado ou já utilizado." }))
+    .RequireRateLimiting("auth");
 
 app.MapGet("/auth/google", (HttpContext http) =>
 {
@@ -84,7 +116,7 @@ app.MapGet("/auth/google", (HttpContext http) =>
     }.Select(item => $"{Uri.EscapeDataString(item.Key)}={Uri.EscapeDataString(item.Value)}"));
 
     return Results.Redirect($"https://accounts.google.com/o/oauth2/v2/auth?{query}");
-});
+}).RequireRateLimiting("auth");
 
 app.MapGet("/auth/google/callback", async (
     HttpContext http,
@@ -187,7 +219,7 @@ app.MapGet("/auth/google/callback", async (
     {
         return Results.Problem("Falha de comunicação com o Google.", statusCode: 502);
     }
-});
+}).RequireRateLimiting("auth");
 
 app.MapGet("/auth/me", (HttpContext http, AuthSessionStore sessions) =>
 {
@@ -201,7 +233,7 @@ app.MapGet("/auth/me", (HttpContext http, AuthSessionStore sessions) =>
         session.Role,
         session.ExpiresUtc
     });
-});
+}).RequireRateLimiting("auth");
 
 app.MapPost("/auth/logout", (HttpContext http, AuthSessionStore sessions) =>
 {
@@ -209,13 +241,17 @@ app.MapPost("/auth/logout", (HttpContext http, AuthSessionStore sessions) =>
         sessions.Revoke(token);
     http.Response.Cookies.Delete("omnia_session");
     return Results.NoContent();
-});
+}).RequireRateLimiting("auth");
 
-app.MapPost("/auth/revoke", (RevokeRequest req, AuthSessionStore sessions) =>
+app.MapPost("/auth/revoke", (HttpContext http, AuthSessionStore sessions) =>
 {
-    sessions.Revoke(req.SessionId);
+    if (!http.Request.Cookies.TryGetValue("omnia_session", out var token) || !sessions.TryGet(token, out _))
+        return Results.Unauthorized();
+
+    sessions.Revoke(token);
+    http.Response.Cookies.Delete("omnia_session");
     return Results.NoContent();
-});
+}).RequireRateLimiting("auth");
 
 app.MapGet("/auth/{provider}", (string provider) => Results.StatusCode(501));
 app.Run();
@@ -231,7 +267,6 @@ static string GetGoogleRedirectUri()
 }
 
 record ConfirmationRequest(string Email);
-record RevokeRequest(string SessionId);
 
 sealed class SmtpConfirmationSender
 {
