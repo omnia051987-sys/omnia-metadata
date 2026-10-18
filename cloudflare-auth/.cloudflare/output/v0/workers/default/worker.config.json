@@ -1,0 +1,1 @@
+{"name":"omnia-metadata-auth","compatibilityDate":"2026-10-18","workersDev":true,"env":{"DB":{"type":"d1","name":"omnia-metadata-auth-db","id":"4209228b-3be5-49bd-9a0a-8a0164437ec5"}},"manifest":{"type":"complete","mainModule":"index.js","modules":{"index.js":{"type":"esm"},"index.js.map":{"type":"sourcemap"}}}}
