@@ -1,14 +1,96 @@
+using System.Net.Http.Json;
+
 namespace Omnia.Metadata.App;
+
 public sealed class CreateAccountForm : Form
 {
+    readonly TextBox email = new() { PlaceholderText = "E-mail", Dock = DockStyle.Fill };
+    readonly Button create = new() { Text = "Enviar link de confirmação", Dock = DockStyle.Fill };
+    readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(30) };
+
     public CreateAccountForm()
     {
-        Text = "Omnia Metadata — Criar conta"; Width = 480; Height = 330; StartPosition = FormStartPosition.CenterParent; FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false;
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new(24), ColumnCount = 1, RowCount = 6, BackColor = Color.White };
-        grid.RowStyles.Add(new(SizeType.Absolute, 42)); grid.RowStyles.Add(new(SizeType.Absolute, 42)); grid.RowStyles.Add(new(SizeType.Absolute, 42)); grid.RowStyles.Add(new(SizeType.Absolute, 42)); grid.RowStyles.Add(new(SizeType.Absolute, 42)); grid.RowStyles.Add(new(SizeType.Percent, 100));
-        var title = new Label { Text = "Criar conta", Font = new Font("Segoe UI", 16, FontStyle.Bold), Dock = DockStyle.Fill, ForeColor = Color.FromArgb(21,45,90) };
-        var email = new TextBox { PlaceholderText = "E-mail", Dock = DockStyle.Fill }; var password = new TextBox { PlaceholderText = "Senha", UseSystemPasswordChar = true, Dock = DockStyle.Fill }; var confirm = new TextBox { PlaceholderText = "Confirmar senha", UseSystemPasswordChar = true, Dock = DockStyle.Fill }; var create = new Button { Text = "Enviar confirmação por e-mail", Dock = DockStyle.Fill };
-        create.Click += (_, _) => MessageBox.Show("A conta será criada após confirmação do link enviado por e-mail. O envio real depende do servidor SMTP configurado.", "Confirmação de e-mail", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        grid.Controls.Add(title,0,0); grid.Controls.Add(email,0,1); grid.Controls.Add(password,0,2); grid.Controls.Add(confirm,0,3); grid.Controls.Add(create,0,4); Controls.Add(grid);
+        Text = "Omnia Metadata — Criar conta";
+        Width = 500;
+        Height = 300;
+        StartPosition = FormStartPosition.CenterParent;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+
+        var grid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(28),
+            ColumnCount = 1,
+            RowCount = 5,
+            BackColor = Color.White
+        };
+        grid.RowStyles.Add(new(SizeType.Absolute, 44));
+        grid.RowStyles.Add(new(SizeType.Absolute, 48));
+        grid.RowStyles.Add(new(SizeType.Absolute, 64));
+        grid.RowStyles.Add(new(SizeType.Absolute, 40));
+        grid.RowStyles.Add(new(SizeType.Percent, 100));
+
+        var title = new Label
+        {
+            Text = "Criar conta",
+            Font = new Font("Segoe UI", 16, FontStyle.Bold),
+            Dock = DockStyle.Fill,
+            ForeColor = Color.FromArgb(21, 45, 90)
+        };
+        var info = new Label
+        {
+            Text = "Informe seu e-mail. Enviaremos um link de confirmação pela conta oficial do Omnia Metadata.",
+            Dock = DockStyle.Fill,
+            AutoEllipsis = true,
+            ForeColor = Color.FromArgb(70, 70, 70)
+        };
+        email.Margin = new Padding(0, 6, 0, 6);
+        create.Click += async (_, _) => await RequestConfirmation();
+
+        grid.Controls.Add(title, 0, 0);
+        grid.Controls.Add(info, 0, 1);
+        grid.Controls.Add(email, 0, 2);
+        grid.Controls.Add(create, 0, 3);
+        Controls.Add(grid);
+        AcceptButton = create;
+    }
+
+    async Task RequestConfirmation()
+    {
+        var address = email.Text.Trim();
+        if (string.IsNullOrWhiteSpace(address) || !address.Contains('@'))
+        {
+            MessageBox.Show("Informe um e-mail válido.", "Criar conta", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        create.Enabled = false;
+        try
+        {
+            using var response = await http.PostAsJsonAsync(
+                $"{AuthClient.BaseUrl}/auth/request-confirmation",
+                new { email = address });
+            if (!response.IsSuccessStatusCode)
+            {
+                MessageBox.Show($"O servidor não aceitou a solicitação ({(int)response.StatusCode}).", "Criar conta", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            MessageBox.Show(
+                "Solicitação enviada. Verifique a caixa de entrada e o spam para confirmar o e-mail.",
+                "Confirmação enviada",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            Close();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Não foi possível solicitar a confirmação: {ex.Message}", "Criar conta", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally
+        {
+            if (!IsDisposed) create.Enabled = true;
+        }
     }
 }

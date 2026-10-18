@@ -26,6 +26,7 @@ builder.Services.AddRateLimiter(options =>
 builder.Services.AddSingleton<TokenStore>();
 builder.Services.AddSingleton<SmtpConfirmationSender>();
 builder.Services.AddSingleton<AuthSessionStore>();
+builder.Services.AddSingleton<DesktopTicketStore>();
 
 var app = builder.Build();
 app.UseRateLimiter();
@@ -83,11 +84,14 @@ app.MapGet("/auth/confirm", (string? token, TokenStore store) =>
             : Results.BadRequest(new { confirmed = false, error = "Token inválido, expirado ou já utilizado." }))
     .RequireRateLimiting("auth");
 
-app.MapGet("/auth/google", (HttpContext http) =>
+app.MapGet("/auth/google", (HttpContext http, string? return_uri) =>
 {
     var clientId = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID");
     if (string.IsNullOrWhiteSpace(clientId))
         return Results.Problem("GOOGLE_CLIENT_ID não configurado.", statusCode: 503);
+
+    if (!string.IsNullOrWhiteSpace(return_uri) && !IsSafeDesktopReturnUri(return_uri))
+        return Results.BadRequest(new { authenticated = false, error = "Endereço de retorno local inválido." });
 
     // The state is carried in a secure, short-lived cookie so a Render cold start
     // between authorization and callback does not invalidate a valid login.
@@ -101,6 +105,18 @@ app.MapGet("/auth/google", (HttpContext http) =>
         MaxAge = TimeSpan.FromMinutes(10),
         IsEssential = true
     });
+    if (!string.IsNullOrWhiteSpace(return_uri))
+    {
+        http.Response.Cookies.Append("omnia_oauth_return", return_uri, new CookieOptions
+        {
+            HttpOnly = true,
+            Secure = true,
+            SameSite = SameSiteMode.None,
+            Path = "/",
+            MaxAge = TimeSpan.FromMinutes(10),
+            IsEssential = true
+        });
+    }
 
     var redirectUri = GetGoogleRedirectUri();
     var query = string.Join("&", new Dictionary<string, string>
@@ -122,6 +138,7 @@ app.MapGet("/auth/google/callback", async (
     HttpContext http,
     IHttpClientFactory clients,
     AuthSessionStore sessions,
+    DesktopTicketStore desktopTickets,
     string? code,
     string? state,
     string? error) =>
@@ -132,7 +149,9 @@ app.MapGet("/auth/google/callback", async (
     // Read the one-time state before expiring the cookie. Deleting it first
     // makes every valid callback look like a missing-state replay.
     var expectedState = http.Request.Cookies["omnia_oauth_state"];
+    var desktopReturnUri = http.Request.Cookies["omnia_oauth_return"];
     http.Response.Cookies.Delete("omnia_oauth_state");
+    http.Response.Cookies.Delete("omnia_oauth_return");
     var stateMatches = !string.IsNullOrWhiteSpace(state)
         && !string.IsNullOrWhiteSpace(expectedState)
         && CryptographicOperations.FixedTimeEquals(
@@ -202,6 +221,12 @@ app.MapGet("/auth/google/callback", async (
             IsEssential = true
         });
 
+        if (IsSafeDesktopReturnUri(desktopReturnUri))
+        {
+            var ticket = desktopTickets.Create(session.Token);
+            return Results.Redirect($"{desktopReturnUri}?ticket={Uri.EscapeDataString(ticket)}");
+        }
+
         return Results.Ok(new
         {
             authenticated = true,
@@ -219,6 +244,25 @@ app.MapGet("/auth/google/callback", async (
     {
         return Results.Problem("Falha de comunicação com o Google.", statusCode: 502);
     }
+}).RequireRateLimiting("auth");
+
+app.MapPost("/auth/desktop/exchange", (DesktopTicketRequest? req, DesktopTicketStore desktopTickets, AuthSessionStore sessions) =>
+{
+    if (req is null || string.IsNullOrWhiteSpace(req.Ticket))
+        return Results.BadRequest(new { authenticated = false, error = "Ticket não informado." });
+
+    if (!desktopTickets.Consume(req.Ticket, out var sessionToken) || !sessions.TryGet(sessionToken, out var session))
+        return Results.Unauthorized();
+
+    return Results.Ok(new
+    {
+        authenticated = true,
+        provider = "google",
+        sessionToken,
+        session.Email,
+        session.Role,
+        session.ExpiresUtc
+    });
 }).RequireRateLimiting("auth");
 
 app.MapGet("/auth/me", (HttpContext http, AuthSessionStore sessions) =>
@@ -266,7 +310,17 @@ static string GetGoogleRedirectUri()
     return $"{baseUrl.TrimEnd('/')}/auth/google/callback";
 }
 
+static bool IsSafeDesktopReturnUri(string? value)
+{
+    if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)) return false;
+    if (uri.Scheme != Uri.UriSchemeHttp) return false;
+    if (uri.Host is not ("127.0.0.1" or "localhost")) return false;
+    return uri.Port is >= 1024 and <= 65535
+        && (uri.AbsolutePath == "/auth/callback" || uri.AbsolutePath == "/auth/callback/");
+}
+
 record ConfirmationRequest(string Email);
+record DesktopTicketRequest(string Ticket);
 
 sealed class SmtpConfirmationSender
 {
@@ -339,4 +393,28 @@ sealed class AuthSessionStore
     }
 
     public void Revoke(string token) => sessions.TryRemove(token, out _);
+}
+
+sealed class DesktopTicketStore
+{
+    readonly ConcurrentDictionary<string, (string SessionToken, DateTime ExpiresUtc)> tickets = new();
+
+    public string Create(string sessionToken)
+    {
+        var ticket = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        tickets[ticket] = (sessionToken, DateTime.UtcNow.AddMinutes(2));
+        return ticket;
+    }
+
+    public bool Consume(string ticket, out string sessionToken)
+    {
+        if (tickets.TryRemove(ticket, out var value) && value.ExpiresUtc >= DateTime.UtcNow)
+        {
+            sessionToken = value.SessionToken;
+            return true;
+        }
+
+        sessionToken = string.Empty;
+        return false;
+    }
 }
