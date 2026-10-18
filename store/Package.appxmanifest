@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-         IgnorableNamespaces="uap">
-  <!-- Replace the Identity Name and Publisher with the values assigned by Partner Center before submission. -->
-  <Identity Name="OmniaMetadata" Publisher="CN=Omnia Metadata" Version="0.7.1.0" />
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap rescap">
+  <Identity Name="OmniAUM.OmniaMetadata" Publisher="CN=EB783670-009E-455A-AEA1-4CF542BC4ACB" Version="0.7.1.0" />
   <Properties>
     <DisplayName>Omnia Metadata</DisplayName>
-    <PublisherDisplayName>Omnia Metadata</PublisherDisplayName>
+    <PublisherDisplayName>OmniAUM</PublisherDisplayName>
     <Description>Análise técnica local de metadados e integridade de arquivos.</Description>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -16,6 +16,9 @@
   <Resources>
     <Resource Language="pt-BR" />
   </Resources>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
   <Applications>
     <Application Id="App" Executable="Omnia.Metadata.App.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
