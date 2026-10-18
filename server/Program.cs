@@ -94,12 +94,13 @@ app.MapGet("/auth/google/callback", async (
     string? state,
     string? error) =>
 {
-    http.Response.Cookies.Delete("omnia_oauth_state");
-
     if (!string.IsNullOrWhiteSpace(error))
         return Results.BadRequest(new { authenticated = false, error = "Autorização Google cancelada." });
 
+    // Read the one-time state before expiring the cookie. Deleting it first
+    // makes every valid callback look like a missing-state replay.
     var expectedState = http.Request.Cookies["omnia_oauth_state"];
+    http.Response.Cookies.Delete("omnia_oauth_state");
     var stateMatches = !string.IsNullOrWhiteSpace(state)
         && !string.IsNullOrWhiteSpace(expectedState)
         && CryptographicOperations.FixedTimeEquals(
