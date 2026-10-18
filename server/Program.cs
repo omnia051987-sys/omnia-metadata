@@ -466,8 +466,7 @@ app.MapGet("/auth/{provider}/callback", async (
             using var userJson = JsonDocument.Parse(await userResponse.Content.ReadAsStringAsync());
             var root = userJson.RootElement;
             subject = root.GetProperty("id").GetInt64().ToString(System.Globalization.CultureInfo.InvariantCulture);
-            email = root.TryGetProperty("email", out var publicEmail) ? publicEmail.GetString()?.Trim().ToLowerInvariant() ?? string.Empty : string.Empty;
-            if (string.IsNullOrWhiteSpace(email))
+            email = string.Empty;
             {
                 using var emailRequest = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/user/emails");
                 emailRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
