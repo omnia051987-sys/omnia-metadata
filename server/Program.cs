@@ -909,9 +909,10 @@ sealed class D1SessionStore
     {
         if (!IsEnabled) return null;
         using var request = NewRequest("/internal/entitlements/get", new { email });
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         try
         {
-            using var response = await client.SendAsync(request);
+            using var response = await client.SendAsync(request, timeout.Token);
             if (!response.IsSuccessStatusCode) return null;
             using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
             var root = json.RootElement;
@@ -929,7 +930,7 @@ sealed class D1SessionStore
                         purchase.TryGetProperty("expiresAt", out var expiresAt) && expiresAt.ValueKind != JsonValueKind.Null ? expiresAt.GetString() : null)).ToArray()
                     : Array.Empty<PurchaseSummary>());
         }
-        catch (Exception ex) when (ex is HttpRequestException or JsonException or KeyNotFoundException)
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or KeyNotFoundException or OperationCanceledException)
         {
             return null;
         }
