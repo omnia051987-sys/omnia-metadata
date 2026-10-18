@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Net.Mail;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using MailKit.Security;
 using MimeKit;
@@ -10,7 +11,6 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<TokenStore>();
 builder.Services.AddSingleton<SmtpConfirmationSender>();
-builder.Services.AddSingleton<OAuthStateStore>();
 builder.Services.AddSingleton<AuthSessionStore>();
 
 var app = builder.Build();
@@ -51,13 +51,15 @@ app.MapGet("/auth/confirm", (string token, TokenStore store) =>
         ? Results.Ok(new { confirmed = true, email })
         : Results.BadRequest(new { confirmed = false, error = "Token inválido, expirado ou já utilizado." }));
 
-app.MapGet("/auth/google", (HttpContext http, OAuthStateStore states) =>
+app.MapGet("/auth/google", (HttpContext http) =>
 {
     var clientId = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID");
     if (string.IsNullOrWhiteSpace(clientId))
         return Results.Problem("GOOGLE_CLIENT_ID não configurado.", statusCode: 503);
 
-    var state = states.Create();
+    // The state is carried in a secure, short-lived cookie so a Render cold start
+    // between authorization and callback does not invalidate a valid login.
+    var state = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     http.Response.Cookies.Append("omnia_oauth_state", state, new CookieOptions
     {
         HttpOnly = true,
@@ -86,7 +88,6 @@ app.MapGet("/auth/google", (HttpContext http, OAuthStateStore states) =>
 app.MapGet("/auth/google/callback", async (
     HttpContext http,
     IHttpClientFactory clients,
-    OAuthStateStore states,
     AuthSessionStore sessions,
     string? code,
     string? state,
@@ -97,7 +98,14 @@ app.MapGet("/auth/google/callback", async (
     if (!string.IsNullOrWhiteSpace(error))
         return Results.BadRequest(new { authenticated = false, error = "Autorização Google cancelada." });
 
-    if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(state) || !states.Consume(state))
+    var expectedState = http.Request.Cookies["omnia_oauth_state"];
+    var stateMatches = !string.IsNullOrWhiteSpace(state)
+        && !string.IsNullOrWhiteSpace(expectedState)
+        && CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(state),
+            Encoding.UTF8.GetBytes(expectedState));
+
+    if (string.IsNullOrWhiteSpace(code) || !stateMatches)
         return Results.BadRequest(new { authenticated = false, error = "Estado OAuth inválido, expirado ou já utilizado." });
 
     var clientId = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID");
@@ -260,21 +268,6 @@ sealed class TokenStore
 
     public string? Consume(string token) =>
         pending.TryRemove(token, out var value) && value.Expires >= DateTime.UtcNow ? value.Email : null;
-}
-
-sealed class OAuthStateStore
-{
-    readonly ConcurrentDictionary<string, DateTime> states = new();
-
-    public string Create()
-    {
-        var state = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        states[state] = DateTime.UtcNow.AddMinutes(10);
-        return state;
-    }
-
-    public bool Consume(string state) =>
-        states.TryRemove(state, out var expires) && expires >= DateTime.UtcNow;
 }
 
 sealed record AuthSession(string Token, string Email, string Subject, string Role, DateTime ExpiresUtc);
