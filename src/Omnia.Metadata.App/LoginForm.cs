@@ -64,9 +64,9 @@ public sealed class LoginForm : Form
         var google = Provider("Continuar com Google");
         google.Click += async (_, _) => await GoogleLogin(google);
         var github = Provider("Continuar com GitHub");
-        github.Click += (_, _) => ProviderUnavailable("GitHub");
+        github.Click += async (_, _) => await ProviderLogin(github, "github", "GitHub");
         var microsoft = Provider("Continuar com Microsoft");
-        microsoft.Click += (_, _) => ProviderUnavailable("Microsoft");
+        microsoft.Click += async (_, _) => await ProviderLogin(microsoft, "microsoft", "Microsoft");
 
         var providerTitle = new Label
         {
@@ -141,6 +141,36 @@ public sealed class LoginForm : Form
             {
                 button.Enabled = true;
                 button.Text = "Continuar com Google";
+            }
+        }
+    }
+
+    async Task ProviderLogin(Button button, string provider, string displayName)
+    {
+        button.Enabled = false;
+        button.Text = $"Aguardando {displayName}...";
+        try
+        {
+            var result = await auth.SignInWithProviderAsync(provider);
+            AuthenticatedEmail = result.Email;
+            SessionToken = result.SessionToken;
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+        catch (OperationCanceledException)
+        {
+            MessageBox.Show("Login cancelado.", $"Login {displayName}", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Não foi possível entrar", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally
+        {
+            if (!IsDisposed)
+            {
+                button.Enabled = true;
+                button.Text = $"Continuar com {displayName}";
             }
         }
     }

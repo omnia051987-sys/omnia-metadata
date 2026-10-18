@@ -15,6 +15,8 @@ var index_default = {
       if (url.pathname === "/internal/session/create") return createSession(request, env);
       if (url.pathname === "/internal/session/get") return getSession(request, env);
       if (url.pathname === "/internal/session/revoke") return revokeSession(request, env);
+      if (url.pathname === "/internal/confirmation/create") return createConfirmation(request, env);
+      if (url.pathname === "/internal/confirmation/consume") return consumeConfirmation(request, env);
       return Response.json({ error: "N\xE3o encontrado." }, { status: 404 });
     } catch (error) {
       console.error("D1 auth store error", error);
@@ -61,6 +63,33 @@ async function revokeSession(request, env) {
   return Response.json({ ok: true });
 }
 __name(revokeSession, "revokeSession");
+async function createConfirmation(request, env) {
+  const input = await request.json();
+  if (!input.token || !input.email || !input.expiresUtc)
+    return Response.json({ error: "Dados de confirma\xE7\xE3o incompletos." }, { status: 400 });
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const tokenHash = await sha256(`confirmation:${input.token}`);
+  await env.DB.prepare(`INSERT OR REPLACE INTO confirmation_tokens
+    (token_hash, email, expires_at, consumed_at, created_at)
+    VALUES (?, ?, ?, NULL, ?)`).bind(tokenHash, input.email.toLowerCase(), input.expiresUtc, now).run();
+  return Response.json({ ok: true });
+}
+__name(createConfirmation, "createConfirmation");
+async function consumeConfirmation(request, env) {
+  const input = await request.json();
+  if (!input.token)
+    return Response.json({ error: "Token n\xE3o informado." }, { status: 400 });
+  const tokenHash = await sha256(`confirmation:${input.token}`);
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const update = await env.DB.prepare(`UPDATE confirmation_tokens
+    SET consumed_at = ?
+    WHERE token_hash = ? AND consumed_at IS NULL AND expires_at >= ?`).bind(now, tokenHash, now).run();
+  if ((update.meta?.changes ?? 0) !== 1)
+    return Response.json({ error: "Token inv\xE1lido, expirado ou j\xE1 utilizado." }, { status: 400 });
+  const row = await env.DB.prepare("SELECT email FROM confirmation_tokens WHERE token_hash = ?").bind(tokenHash).first();
+  return row ? Response.json({ email: row.email }) : Response.json({ error: "Token inv\xE1lido." }, { status: 400 });
+}
+__name(consumeConfirmation, "consumeConfirmation");
 async function sha256(value) {
   const bytes = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest("SHA-256", bytes);

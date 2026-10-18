@@ -6,7 +6,7 @@ using System.Text.Json;
 
 namespace Omnia.Metadata.App;
 
-public sealed record AuthResult(string Email, string Role, string SessionToken, DateTime ExpiresUtc);
+public sealed record AuthResult(string Email, string Role, string SessionToken, DateTime ExpiresUtc, string Provider);
 
 public sealed class AuthClient
 {
@@ -15,7 +15,10 @@ public sealed class AuthClient
 
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
 
-    public async Task<AuthResult> SignInWithGoogleAsync(CancellationToken cancellationToken = default)
+    public Task<AuthResult> SignInWithGoogleAsync(CancellationToken cancellationToken = default) =>
+        SignInWithProviderAsync("google", cancellationToken);
+
+    public async Task<AuthResult> SignInWithProviderAsync(string provider, CancellationToken cancellationToken = default)
     {
         var port = GetFreePort();
         var returnUri = $"http://127.0.0.1:{port}/auth/callback/";
@@ -23,7 +26,7 @@ public sealed class AuthClient
         listener.Prefixes.Add(returnUri);
         listener.Start();
 
-        var authorizeUrl = $"{BaseUrl}/auth/google?return_uri={Uri.EscapeDataString(returnUri)}";
+        var authorizeUrl = $"{BaseUrl}/auth/{Uri.EscapeDataString(provider)}?return_uri={Uri.EscapeDataString(returnUri)}";
         Process.Start(new ProcessStartInfo(authorizeUrl) { UseShellExecute = true });
 
         using var registration = cancellationToken.Register(() => listener.Stop());

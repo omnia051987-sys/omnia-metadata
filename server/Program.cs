@@ -46,7 +46,7 @@ app.Use(async (context, next) =>
 
 app.MapGet("/health", () => Results.Ok(new { service = "omnia-auth", status = "ok", utc = DateTime.UtcNow }));
 
-app.MapPost("/auth/request-confirmation", async (ConfirmationRequest? req, TokenStore store, SmtpConfirmationSender mailer) =>
+app.MapPost("/auth/request-confirmation", async (ConfirmationRequest? req, TokenStore store, D1SessionStore durable, SmtpConfirmationSender mailer) =>
 {
     if (req is null || string.IsNullOrWhiteSpace(req.Email) || req.Email.Length > 320)
         return Results.BadRequest(new { error = "Informe um e-mail válido." });
@@ -55,6 +55,8 @@ app.MapPost("/auth/request-confirmation", async (ConfirmationRequest? req, Token
     catch { return Results.BadRequest(new { error = "E-mail inválido." }); }
 
     var token = store.Create(req.Email);
+    if (durable.IsEnabled && !await durable.CreateConfirmationAsync(token, req.Email.Trim()))
+        return Results.Problem("Não foi possível persistir o token de confirmação.", statusCode: 503);
     var baseUrl = Environment.GetEnvironmentVariable("OMNIA_AUTH_BASE_URL") ?? "https://auth.omniametadata.com";
     var link = $"{baseUrl.TrimEnd('/')}/auth/confirm?token={Uri.EscapeDataString(token)}";
 
@@ -78,12 +80,25 @@ app.MapPost("/auth/request-confirmation", async (ConfirmationRequest? req, Token
     });
 }).RequireRateLimiting("auth");
 
-app.MapGet("/auth/confirm", (string? token, TokenStore store) =>
-    string.IsNullOrWhiteSpace(token)
-        ? Results.BadRequest(new { confirmed = false, error = "Token não informado." })
-        : store.Consume(token) is string email
+app.MapGet("/auth/confirm", async (string? token, TokenStore store, D1SessionStore durable) =>
+{
+    if (string.IsNullOrWhiteSpace(token))
+        return Results.BadRequest(new { confirmed = false, error = "Token não informado." });
+
+    if (durable.IsEnabled)
+    {
+        var result = await durable.ConsumeConfirmationAsync(token);
+        if (result is null)
+            return Results.Problem("Não foi possível consultar o token de confirmação.", statusCode: 503);
+        return result.Value.Email is string email
             ? Results.Ok(new { confirmed = true, email })
-            : Results.BadRequest(new { confirmed = false, error = "Token inválido, expirado ou já utilizado." }))
+            : Results.BadRequest(new { confirmed = false, error = "Token inválido, expirado ou já utilizado." });
+    }
+
+    return store.Consume(token) is string localEmail
+        ? Results.Ok(new { confirmed = true, email = localEmail })
+        : Results.BadRequest(new { confirmed = false, error = "Token inválido, expirado ou já utilizado." });
+})
     .RequireRateLimiting("auth");
 
 app.MapGet("/auth/google", (HttpContext http, string? return_uri) =>
@@ -228,7 +243,7 @@ app.MapGet("/auth/google/callback", async (
 
         if (IsSafeDesktopReturnUri(desktopReturnUri))
         {
-            var ticket = desktopTickets.Create(session.Token);
+            var ticket = desktopTickets.Create(session.Token, "google");
             return Results.Redirect($"{desktopReturnUri}?ticket={Uri.EscapeDataString(ticket)}");
         }
 
@@ -256,13 +271,13 @@ app.MapPost("/auth/desktop/exchange", (DesktopTicketRequest? req, DesktopTicketS
     if (req is null || string.IsNullOrWhiteSpace(req.Ticket))
         return Results.BadRequest(new { authenticated = false, error = "Ticket não informado." });
 
-    if (!desktopTickets.Consume(req.Ticket, out var sessionToken) || !sessions.TryGet(sessionToken, out var session))
+    if (!desktopTickets.Consume(req.Ticket, out var sessionToken, out var provider) || !sessions.TryGet(sessionToken, out var session))
         return Results.Unauthorized();
 
     return Results.Ok(new
     {
         authenticated = true,
-        provider = "google",
+        provider,
         sessionToken,
         session.Email,
         session.Role,
@@ -318,7 +333,209 @@ app.MapPost("/auth/revoke", async (HttpContext http, AuthSessionStore sessions, 
     return Results.NoContent();
 }).RequireRateLimiting("auth");
 
-app.MapGet("/auth/{provider}", (string provider) => Results.StatusCode(501));
+app.MapGet("/auth/{provider}", (HttpContext http, string provider, string? return_uri) =>
+{
+    provider = provider.Trim().ToLowerInvariant();
+    if (provider is not ("github" or "microsoft"))
+        return Results.NotFound(new { authenticated = false, error = "Provedor OAuth não suportado." });
+
+    var clientId = Environment.GetEnvironmentVariable($"{provider.ToUpperInvariant()}_CLIENT_ID");
+    if (string.IsNullOrWhiteSpace(clientId))
+        return Results.Problem($"OAuth {ProviderDisplayName(provider)} não configurado.", statusCode: 503);
+
+    if (!string.IsNullOrWhiteSpace(return_uri) && !IsSafeDesktopReturnUri(return_uri))
+        return Results.BadRequest(new { authenticated = false, error = "Endereço de retorno local inválido." });
+
+    var state = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+    AppendOAuthCookie(http, StateCookieName(provider), state);
+    if (!string.IsNullOrWhiteSpace(return_uri))
+        AppendOAuthCookie(http, ReturnCookieName(provider), return_uri);
+
+    var query = new Dictionary<string, string>
+    {
+        ["client_id"] = clientId,
+        ["redirect_uri"] = GetProviderRedirectUri(provider),
+        ["response_type"] = "code",
+        ["state"] = state
+    };
+    if (provider == "github")
+    {
+        query["scope"] = "read:user user:email";
+        query["allow_signup"] = "true";
+        return Results.Redirect("https://github.com/login/oauth/authorize?" + EncodeQuery(query));
+    }
+
+    query["scope"] = "openid profile email User.Read";
+    query["response_mode"] = "query";
+    query["prompt"] = "select_account";
+    var tenant = Environment.GetEnvironmentVariable("MICROSOFT_TENANT_ID") ?? "common";
+    return Results.Redirect($"https://login.microsoftonline.com/{Uri.EscapeDataString(tenant)}/oauth2/v2.0/authorize?" + EncodeQuery(query));
+}).RequireRateLimiting("auth");
+
+app.MapGet("/auth/{provider}/callback", async (
+    HttpContext http,
+    IHttpClientFactory clients,
+    AuthSessionStore sessions,
+    DesktopTicketStore desktopTickets,
+    D1SessionStore durable,
+    string provider,
+    string? code,
+    string? state,
+    string? error) =>
+{
+    provider = provider.Trim().ToLowerInvariant();
+    if (provider is not ("github" or "microsoft"))
+        return Results.NotFound(new { authenticated = false, error = "Provedor OAuth não suportado." });
+    if (!string.IsNullOrWhiteSpace(error))
+        return Results.BadRequest(new { authenticated = false, error = $"Autorização {ProviderDisplayName(provider)} cancelada." });
+
+    var expectedState = http.Request.Cookies[StateCookieName(provider)];
+    var desktopReturnUri = http.Request.Cookies[ReturnCookieName(provider)];
+    http.Response.Cookies.Delete(StateCookieName(provider));
+    http.Response.Cookies.Delete(ReturnCookieName(provider));
+    if (string.IsNullOrWhiteSpace(code) || !StateMatches(state, expectedState))
+        return Results.BadRequest(new { authenticated = false, error = "Estado OAuth inválido, expirado ou já utilizado." });
+
+    var clientId = Environment.GetEnvironmentVariable($"{provider.ToUpperInvariant()}_CLIENT_ID");
+    var clientSecret = Environment.GetEnvironmentVariable($"{provider.ToUpperInvariant()}_CLIENT_SECRET");
+    if (string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(clientSecret))
+        return Results.Problem($"Credenciais OAuth {ProviderDisplayName(provider)} não configuradas.", statusCode: 503);
+
+    try
+    {
+        var client = clients.CreateClient();
+        string accessToken;
+        if (provider == "github")
+        {
+            using var tokenRequest = new HttpRequestMessage(HttpMethod.Post, "https://github.com/login/oauth/access_token")
+            {
+                Content = new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["code"] = code,
+                    ["client_id"] = clientId,
+                    ["client_secret"] = clientSecret,
+                    ["redirect_uri"] = GetProviderRedirectUri(provider)
+                })
+            };
+            tokenRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            using var tokenResponse = await client.SendAsync(tokenRequest);
+            if (!tokenResponse.IsSuccessStatusCode)
+                return Results.Problem("O GitHub recusou a troca do código de autorização.", statusCode: 502);
+            using var tokenJson = JsonDocument.Parse(await tokenResponse.Content.ReadAsStringAsync());
+            if (!tokenJson.RootElement.TryGetProperty("access_token", out var tokenElement))
+                return Results.Problem("Resposta do GitHub sem access_token.", statusCode: 502);
+            accessToken = tokenElement.GetString() ?? string.Empty;
+        }
+        else
+        {
+            var tenant = Environment.GetEnvironmentVariable("MICROSOFT_TENANT_ID") ?? "common";
+            using var tokenRequest = new HttpRequestMessage(HttpMethod.Post, $"https://login.microsoftonline.com/{Uri.EscapeDataString(tenant)}/oauth2/v2.0/token")
+            {
+                Content = new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["code"] = code,
+                    ["client_id"] = clientId,
+                    ["client_secret"] = clientSecret,
+                    ["redirect_uri"] = GetProviderRedirectUri(provider),
+                    ["grant_type"] = "authorization_code",
+                    ["scope"] = "openid profile email User.Read"
+                })
+            };
+            using var tokenResponse = await client.SendAsync(tokenRequest);
+            if (!tokenResponse.IsSuccessStatusCode)
+                return Results.Problem("A Microsoft recusou a troca do código de autorização.", statusCode: 502);
+            using var tokenJson = JsonDocument.Parse(await tokenResponse.Content.ReadAsStringAsync());
+            if (!tokenJson.RootElement.TryGetProperty("access_token", out var tokenElement))
+                return Results.Problem("Resposta da Microsoft sem access_token.", statusCode: 502);
+            accessToken = tokenElement.GetString() ?? string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(accessToken))
+            return Results.Problem("O provedor não retornou um token de acesso.", statusCode: 502);
+
+        string email;
+        string subject;
+        if (provider == "github")
+        {
+            using var userRequest = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/user");
+            userRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            userRequest.Headers.UserAgent.ParseAdd("Omnia-Metadata/0.7");
+            using var userResponse = await client.SendAsync(userRequest);
+            if (!userResponse.IsSuccessStatusCode)
+                return Results.Problem("Não foi possível validar o perfil no GitHub.", statusCode: 502);
+            using var userJson = JsonDocument.Parse(await userResponse.Content.ReadAsStringAsync());
+            var root = userJson.RootElement;
+            subject = root.GetProperty("id").GetInt64().ToString(System.Globalization.CultureInfo.InvariantCulture);
+            email = root.TryGetProperty("email", out var publicEmail) ? publicEmail.GetString()?.Trim().ToLowerInvariant() ?? string.Empty : string.Empty;
+            if (string.IsNullOrWhiteSpace(email))
+            {
+                using var emailRequest = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/user/emails");
+                emailRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+                emailRequest.Headers.UserAgent.ParseAdd("Omnia-Metadata/0.7");
+                using var emailResponse = await client.SendAsync(emailRequest);
+                if (!emailResponse.IsSuccessStatusCode)
+                    return Results.BadRequest(new { authenticated = false, error = "O GitHub não disponibilizou um e-mail para a conta." });
+                using var emailJson = JsonDocument.Parse(await emailResponse.Content.ReadAsStringAsync());
+                foreach (var candidate in emailJson.RootElement.EnumerateArray())
+                {
+                    if (candidate.TryGetProperty("primary", out var primary) && primary.GetBoolean()
+                        && candidate.TryGetProperty("verified", out var verified) && verified.GetBoolean()
+                        && candidate.TryGetProperty("email", out var selected))
+                    {
+                        email = selected.GetString()?.Trim().ToLowerInvariant() ?? string.Empty;
+                        break;
+                    }
+                }
+            }
+        }
+        else
+        {
+            using var userRequest = new HttpRequestMessage(HttpMethod.Get, "https://graph.microsoft.com/v1.0/me");
+            userRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            using var userResponse = await client.SendAsync(userRequest);
+            if (!userResponse.IsSuccessStatusCode)
+                return Results.Problem("Não foi possível validar o perfil na Microsoft.", statusCode: 502);
+            using var userJson = JsonDocument.Parse(await userResponse.Content.ReadAsStringAsync());
+            var root = userJson.RootElement;
+            subject = root.GetProperty("id").GetString() ?? string.Empty;
+            email = root.TryGetProperty("mail", out var mail) ? mail.GetString()?.Trim().ToLowerInvariant() ?? string.Empty : string.Empty;
+            if (string.IsNullOrWhiteSpace(email) && root.TryGetProperty("userPrincipalName", out var upn))
+                email = upn.GetString()?.Trim().ToLowerInvariant() ?? string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(subject))
+            return Results.BadRequest(new { authenticated = false, error = $"O {ProviderDisplayName(provider)} não confirmou um e-mail utilizável." });
+
+        var role = IsOwnerEmail(email) ? "owner" : "user";
+        var session = sessions.Create(email, subject, role);
+        if (!await durable.CreateAsync(session, provider))
+            return Results.Problem("Não foi possível persistir a sessão com segurança.", statusCode: 503);
+        http.Response.Cookies.Append("omnia_session", session.Token, new CookieOptions
+        {
+            HttpOnly = true,
+            Secure = true,
+            SameSite = SameSiteMode.Lax,
+            MaxAge = TimeSpan.FromHours(8),
+            IsEssential = true
+        });
+
+        if (IsSafeDesktopReturnUri(desktopReturnUri))
+        {
+            var ticket = desktopTickets.Create(session.Token, provider);
+            return Results.Redirect($"{desktopReturnUri}?ticket={Uri.EscapeDataString(ticket)}");
+        }
+
+        return Results.Ok(new { authenticated = true, provider, email, role, expiresUtc = session.ExpiresUtc });
+    }
+    catch (JsonException)
+    {
+        return Results.Problem($"Resposta inválida recebida do {ProviderDisplayName(provider)}.", statusCode: 502);
+    }
+    catch (HttpRequestException)
+    {
+        return Results.Problem($"Falha de comunicação com o {ProviderDisplayName(provider)}.", statusCode: 502);
+    }
+}).RequireRateLimiting("auth");
 app.Run();
 
 static bool IsOwnerEmail(string email) => email.Equals("leohighway@gmail.com", StringComparison.OrdinalIgnoreCase)
@@ -330,6 +547,33 @@ static string GetGoogleRedirectUri()
     var baseUrl = Environment.GetEnvironmentVariable("OMNIA_AUTH_BASE_URL") ?? "https://auth.omniametadata.com";
     return $"{baseUrl.TrimEnd('/')}/auth/google/callback";
 }
+
+static string GetProviderRedirectUri(string provider)
+{
+    var baseUrl = Environment.GetEnvironmentVariable("OMNIA_AUTH_BASE_URL") ?? "https://auth.omniametadata.com";
+    return $"{baseUrl.TrimEnd('/')}/auth/{provider}/callback";
+}
+
+static string ProviderDisplayName(string provider) => provider == "github" ? "GitHub" : "Microsoft";
+
+static string StateCookieName(string provider) => $"omnia_oauth_state_{provider}";
+static string ReturnCookieName(string provider) => $"omnia_oauth_return_{provider}";
+
+static void AppendOAuthCookie(HttpContext http, string name, string value) => http.Response.Cookies.Append(name, value, new CookieOptions
+{
+    HttpOnly = true,
+    Secure = true,
+    SameSite = SameSiteMode.None,
+    Path = "/",
+    MaxAge = TimeSpan.FromMinutes(10),
+    IsEssential = true
+});
+
+static bool StateMatches(string? state, string? expectedState) => !string.IsNullOrWhiteSpace(state)
+    && !string.IsNullOrWhiteSpace(expectedState)
+    && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(state), Encoding.UTF8.GetBytes(expectedState));
+
+static string EncodeQuery(Dictionary<string, string> query) => string.Join("&", query.Select(item => $"{Uri.EscapeDataString(item.Key)}={Uri.EscapeDataString(item.Value)}"));
 
 static bool IsSafeDesktopReturnUri(string? value)
 {
@@ -418,24 +662,26 @@ sealed class AuthSessionStore
 
 sealed class DesktopTicketStore
 {
-    readonly ConcurrentDictionary<string, (string SessionToken, DateTime ExpiresUtc)> tickets = new();
+    readonly ConcurrentDictionary<string, (string SessionToken, string Provider, DateTime ExpiresUtc)> tickets = new();
 
-    public string Create(string sessionToken)
+    public string Create(string sessionToken, string provider)
     {
         var ticket = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        tickets[ticket] = (sessionToken, DateTime.UtcNow.AddMinutes(2));
+        tickets[ticket] = (sessionToken, provider, DateTime.UtcNow.AddMinutes(2));
         return ticket;
     }
 
-    public bool Consume(string ticket, out string sessionToken)
+    public bool Consume(string ticket, out string sessionToken, out string provider)
     {
         if (tickets.TryRemove(ticket, out var value) && value.ExpiresUtc >= DateTime.UtcNow)
         {
             sessionToken = value.SessionToken;
+            provider = value.Provider;
             return true;
         }
 
         sessionToken = string.Empty;
+        provider = string.Empty;
         return false;
     }
 }
@@ -447,11 +693,11 @@ sealed class D1SessionStore
     readonly string? secret = Environment.GetEnvironmentVariable("OMNIA_D1_STORE_SECRET");
 
     public D1SessionStore(HttpClient client) => this.client = client;
-    bool Enabled => !string.IsNullOrWhiteSpace(baseUrl) && !string.IsNullOrWhiteSpace(secret);
+    public bool IsEnabled => !string.IsNullOrWhiteSpace(baseUrl) && !string.IsNullOrWhiteSpace(secret);
 
     public async Task<bool> CreateAsync(AuthSession session, string provider)
     {
-        if (!Enabled) return true;
+        if (!IsEnabled) return true;
         using var request = NewRequest("/internal/session/create", new
         {
             token = session.Token,
@@ -467,7 +713,7 @@ sealed class D1SessionStore
 
     public async Task<AuthSession?> GetAsync(string token)
     {
-        if (!Enabled) return null;
+        if (!IsEnabled) return null;
         using var request = NewRequest("/internal/session/get", new { token });
         try
         {
@@ -488,10 +734,44 @@ sealed class D1SessionStore
 
     public async Task RevokeAsync(string token)
     {
-        if (!Enabled) return;
+        if (!IsEnabled) return;
         using var request = NewRequest("/internal/session/revoke", new { token });
         try { using var _ = await client.SendAsync(request); }
         catch (HttpRequestException) { }
+    }
+
+    public async Task<bool> CreateConfirmationAsync(string token, string email)
+    {
+        if (!IsEnabled) return true;
+        using var request = NewRequest("/internal/confirmation/create", new
+        {
+            token,
+            email,
+            expiresUtc = DateTime.UtcNow.AddHours(24)
+        });
+        try { using var response = await client.SendAsync(request); return response.IsSuccessStatusCode; }
+        catch (HttpRequestException) { return false; }
+    }
+
+    public async Task<(bool IsValid, string? Email)?> ConsumeConfirmationAsync(string token)
+    {
+        if (!IsEnabled) return null;
+        using var request = NewRequest("/internal/confirmation/consume", new { token });
+        try
+        {
+            using var response = await client.SendAsync(request);
+            if ((int)response.StatusCode == 400)
+                return (false, null);
+            if (!response.IsSuccessStatusCode)
+                return null;
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var email = json.RootElement.GetProperty("email").GetString();
+            return (true, email);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or KeyNotFoundException)
+        {
+            return null;
+        }
     }
 
     HttpRequestMessage NewRequest(string path, object body)
