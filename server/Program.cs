@@ -14,7 +14,18 @@ app.MapPost("/auth/request-confirmation", async (ConfirmationRequest req, TokenS
     var token = store.Create(req.Email);
     var baseUrl = Environment.GetEnvironmentVariable("OMNIA_AUTH_BASE_URL") ?? "https://auth.omniametadata.com";
     var link = $"{baseUrl}/auth/confirm?token={Uri.EscapeDataString(token)}";
-    await mailer.SendAsync(req.Email.Trim(), link);
+    try
+    {
+        await mailer.SendAsync(req.Email.Trim(), link).WaitAsync(TimeSpan.FromSeconds(15));
+    }
+    catch (TimeoutException)
+    {
+        return Results.Problem("O provedor de hospedagem não concluiu a conexão SMTP dentro do prazo.", statusCode: 503);
+    }
+    catch (SmtpException ex)
+    {
+        return Results.Problem($"Falha SMTP: {ex.StatusCode}", statusCode: 502);
+    }
     return Results.Accepted(value: new { message = "Solicitação registrada. Verifique seu e-mail para confirmar a conta.", sender = mailer.From });
 });
 app.MapGet("/auth/confirm", (string token, TokenStore store) => store.Consume(token) is string email ? Results.Ok(new { confirmed = true, email }) : Results.BadRequest(new { confirmed = false, error = "Token inválido, expirado ou já utilizado." }));
