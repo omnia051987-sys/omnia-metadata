@@ -46,60 +46,63 @@ app.Use(async (context, next) =>
 
 app.MapGet("/health", () => Results.Ok(new { service = "omnia-auth", status = "ok", utc = DateTime.UtcNow }));
 
-app.MapPost("/auth/request-confirmation", async (ConfirmationRequest? req, TokenStore store, D1SessionStore durable, SmtpConfirmationSender mailer) =>
+app.MapPost("/auth/request-confirmation", () => Results.StatusCode(StatusCodes.Status410Gone))
+    .RequireRateLimiting("auth");
+
+app.MapGet("/auth/confirm", () => Results.StatusCode(StatusCodes.Status410Gone))
+    .RequireRateLimiting("auth");
+
+app.MapPost("/auth/register", async (PasswordRegistrationRequest? req, D1SessionStore durable) =>
 {
-    if (req is null || string.IsNullOrWhiteSpace(req.Email) || req.Email.Length > 320)
-        return Results.BadRequest(new { error = "Informe um e-mail válido." });
+    if (req is null || string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.Password))
+        return Results.BadRequest(new { error = "Informe e-mail e senha." });
+    if (!IsValidEmail(req.Email) || req.Password.Length is < 12 or > 256)
+        return Results.BadRequest(new { error = "Use um e-mail válido e uma senha entre 12 e 256 caracteres." });
+    if (!durable.IsEnabled)
+        return Results.Problem("A persistência de contas não está configurada.", statusCode: 503);
 
-    try { _ = new MailAddress(req.Email); }
-    catch { return Results.BadRequest(new { error = "E-mail inválido." }); }
-
-    var token = store.Create(req.Email);
-    if (durable.IsEnabled && !await durable.CreateConfirmationAsync(token, req.Email.Trim()))
-        return Results.Problem("Não foi possível persistir o token de confirmação.", statusCode: 503);
-    var baseUrl = Environment.GetEnvironmentVariable("OMNIA_AUTH_BASE_URL") ?? "https://auth.omniametadata.com";
-    var link = $"{baseUrl.TrimEnd('/')}/auth/confirm?token={Uri.EscapeDataString(token)}";
-
-    try
+    var email = req.Email.Trim().ToLowerInvariant();
+    var credential = CreatePasswordCredential(req.Password);
+    var status = await durable.RegisterPasswordAsync(email, credential);
+    return status switch
     {
-        await mailer.SendAsync(req.Email.Trim(), link).WaitAsync(TimeSpan.FromSeconds(15));
-    }
-    catch (TimeoutException)
-    {
-        return Results.Problem("Timeout na conexão SMTP.", statusCode: 503);
-    }
-    catch (Exception ex)
-    {
-        return Results.Problem($"Falha SMTP: {ex.GetType().Name}", statusCode: 502);
-    }
-
-    return Results.Accepted(value: new
-    {
-        message = "Solicitação registrada. Verifique seu e-mail.",
-        sender = mailer.From
-    });
+        PasswordRegistrationStatus.Created => Results.Created("/auth/me", new { created = true, email }),
+        PasswordRegistrationStatus.Exists => Results.Conflict(new { error = "Esta conta já possui senha cadastrada. Use o login existente." }),
+        _ => Results.Problem("Não foi possível persistir a conta.", statusCode: 503)
+    };
 }).RequireRateLimiting("auth");
 
-app.MapGet("/auth/confirm", async (string? token, TokenStore store, D1SessionStore durable) =>
+app.MapPost("/auth/password/login", async (
+    PasswordLoginRequest? req,
+    HttpContext http,
+    AuthSessionStore sessions,
+    D1SessionStore durable) =>
 {
-    if (string.IsNullOrWhiteSpace(token))
-        return Results.BadRequest(new { confirmed = false, error = "Token não informado." });
+    if (req is null || string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.Password))
+        return Results.BadRequest(new { authenticated = false, error = "Informe e-mail e senha." });
+    if (!IsValidEmail(req.Email) || req.Password.Length > 256)
+        return Results.Unauthorized();
+    if (!durable.IsEnabled)
+        return Results.Problem("A persistência de contas não está configurada.", statusCode: 503);
 
-    if (durable.IsEnabled)
+    var email = req.Email.Trim().ToLowerInvariant();
+    var credential = await durable.GetPasswordAsync(email);
+    if (credential is null || !VerifyPassword(req.Password, credential))
+        return Results.Unauthorized();
+
+    var session = sessions.Create(email, $"password:{email}", credential.Role);
+    if (!await durable.CreateAsync(session, "password"))
+        return Results.Problem("Não foi possível persistir a sessão com segurança.", statusCode: 503);
+    http.Response.Cookies.Append("omnia_session", session.Token, new CookieOptions
     {
-        var result = await durable.ConsumeConfirmationAsync(token);
-        if (result is null)
-            return Results.Problem("Não foi possível consultar o token de confirmação.", statusCode: 503);
-        return result.Value.Email is string email
-            ? Results.Ok(new { confirmed = true, email })
-            : Results.BadRequest(new { confirmed = false, error = "Token inválido, expirado ou já utilizado." });
-    }
-
-    return store.Consume(token) is string localEmail
-        ? Results.Ok(new { confirmed = true, email = localEmail })
-        : Results.BadRequest(new { confirmed = false, error = "Token inválido, expirado ou já utilizado." });
-})
-    .RequireRateLimiting("auth");
+        HttpOnly = true,
+        Secure = true,
+        SameSite = SameSiteMode.Lax,
+        MaxAge = TimeSpan.FromHours(8),
+        IsEssential = true
+    });
+    return Results.Ok(new { authenticated = true, provider = "password", email, role = credential.Role, sessionToken = session.Token, expiresUtc = session.ExpiresUtc });
+}).RequireRateLimiting("auth");
 
 app.MapGet("/auth/google", (HttpContext http, string? return_uri) =>
 {
@@ -583,8 +586,48 @@ static bool IsSafeDesktopReturnUri(string? value)
         && (uri.AbsolutePath == "/auth/callback" || uri.AbsolutePath == "/auth/callback/");
 }
 
+static bool IsValidEmail(string email)
+{
+    try { _ = new MailAddress(email); return true; }
+    catch { return false; }
+}
+
+static PasswordCredentialData CreatePasswordCredential(string password)
+{
+    const int iterations = 600_000;
+    var salt = RandomNumberGenerator.GetBytes(16);
+    var hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, 32);
+    return new PasswordCredentialData(
+        Convert.ToBase64String(hash),
+        Convert.ToBase64String(salt),
+        iterations,
+        "user");
+}
+
+static bool VerifyPassword(string password, PasswordCredentialData credential)
+{
+    try
+    {
+        var salt = Convert.FromBase64String(credential.SaltB64);
+        var expected = Convert.FromBase64String(credential.HashB64);
+        var actual = Rfc2898DeriveBytes.Pbkdf2(password, salt, credential.Iterations, HashAlgorithmName.SHA256, expected.Length);
+        return CryptographicOperations.FixedTimeEquals(actual, expected);
+    }
+    catch (FormatException) { return false; }
+}
+
 record ConfirmationRequest(string Email);
 record DesktopTicketRequest(string Ticket);
+record PasswordRegistrationRequest(string Email, string Password);
+record PasswordLoginRequest(string Email, string Password);
+sealed record PasswordCredentialData(string HashB64, string SaltB64, int Iterations, string Role);
+
+enum PasswordRegistrationStatus
+{
+    Unavailable,
+    Created,
+    Exists
+}
 
 sealed class SmtpConfirmationSender
 {
@@ -768,6 +811,47 @@ sealed class D1SessionStore
             return (true, email);
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or KeyNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    public async Task<PasswordRegistrationStatus> RegisterPasswordAsync(string email, PasswordCredentialData credential)
+    {
+        if (!IsEnabled) return PasswordRegistrationStatus.Unavailable;
+        using var request = NewRequest("/internal/password/register", new
+        {
+            email,
+            hashB64 = credential.HashB64,
+            saltB64 = credential.SaltB64,
+            iterations = credential.Iterations
+        });
+        try
+        {
+            using var response = await client.SendAsync(request);
+            if ((int)response.StatusCode == 409) return PasswordRegistrationStatus.Exists;
+            return response.IsSuccessStatusCode ? PasswordRegistrationStatus.Created : PasswordRegistrationStatus.Unavailable;
+        }
+        catch (HttpRequestException) { return PasswordRegistrationStatus.Unavailable; }
+    }
+
+    public async Task<PasswordCredentialData?> GetPasswordAsync(string email)
+    {
+        if (!IsEnabled) return null;
+        using var request = NewRequest("/internal/password/get", new { email });
+        try
+        {
+            using var response = await client.SendAsync(request);
+            if (!response.IsSuccessStatusCode) return null;
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var root = json.RootElement;
+            return new PasswordCredentialData(
+                root.GetProperty("hashB64").GetString()!,
+                root.GetProperty("saltB64").GetString()!,
+                root.GetProperty("iterations").GetInt32(),
+                root.GetProperty("role").GetString()!);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or KeyNotFoundException or FormatException)
         {
             return null;
         }

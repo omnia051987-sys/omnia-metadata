@@ -47,7 +47,7 @@ public sealed class LoginForm : Form
         };
         var note = new Label
         {
-            Text = "Entre com uma conta verificada. O login Google abre uma janela segura do provedor.",
+            Text = "Entre com e-mail e senha ou use um provedor OAuth.",
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
             ForeColor = Color.FromArgb(70, 70, 70),
@@ -57,12 +57,12 @@ public sealed class LoginForm : Form
         password.Margin = new Padding(0, 5, 0, 5);
 
         var emailLogin = ActionButton("Entrar com e-mail");
-        emailLogin.Click += (_, _) => EmailLogin();
+        emailLogin.Click += async (_, _) => await EmailLogin(emailLogin);
         var create = ActionButton("Criar conta");
         create.Click += (_, _) => { using var form = new CreateAccountForm(); form.ShowDialog(this); };
 
         var google = Provider("Continuar com Google");
-        google.Click += async (_, _) => await GoogleLogin(google);
+        google.Click += async (_, _) => await ProviderLogin(google, "google", "Google");
         var github = Provider("Continuar com GitHub");
         github.Click += async (_, _) => await ProviderLogin(github, "github", "GitHub");
         var microsoft = Provider("Continuar com Microsoft");
@@ -115,21 +115,22 @@ public sealed class LoginForm : Form
         Margin = new Padding(0, 4, 6, 4)
     };
 
-    async Task GoogleLogin(Button button)
+    async Task EmailLogin(Button button)
     {
+        if (string.IsNullOrWhiteSpace(email.Text) || string.IsNullOrWhiteSpace(password.Text))
+        {
+            MessageBox.Show("Informe e-mail e senha.", "Login por e-mail", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         button.Enabled = false;
-        button.Text = "Aguardando Google...";
         try
         {
-            var result = await auth.SignInWithGoogleAsync();
+            var result = await auth.SignInWithPasswordAsync(email.Text.Trim(), password.Text);
             AuthenticatedEmail = result.Email;
             SessionToken = result.SessionToken;
             DialogResult = DialogResult.OK;
             Close();
-        }
-        catch (OperationCanceledException)
-        {
-            MessageBox.Show("Login cancelado.", "Login Google", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)
         {
@@ -137,11 +138,7 @@ public sealed class LoginForm : Form
         }
         finally
         {
-            if (!IsDisposed)
-            {
-                button.Enabled = true;
-                button.Text = "Continuar com Google";
-            }
+            if (!IsDisposed) button.Enabled = true;
         }
     }
 
@@ -174,19 +171,4 @@ public sealed class LoginForm : Form
             }
         }
     }
-
-    void EmailLogin()
-    {
-        MessageBox.Show(
-            "O login por e-mail e senha ainda não está habilitado no servidor. Use o botão Google ou crie uma conta para receber o link de confirmação.",
-            "Login por e-mail",
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Information);
-    }
-
-    static void ProviderUnavailable(string name) => MessageBox.Show(
-        $"O OAuth {name} ainda depende do Client ID e do Client Secret desse provedor no servidor. Nenhuma identidade foi autenticada.",
-        "Provedor não configurado",
-        MessageBoxButtons.OK,
-        MessageBoxIcon.Information);
 }

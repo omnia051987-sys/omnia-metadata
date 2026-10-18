@@ -18,6 +18,17 @@ type ConfirmationInput = {
   expiresUtc?: string;
 };
 
+type PasswordRegistrationInput = {
+  email?: string;
+  hashB64?: string;
+  saltB64?: string;
+  iterations?: number;
+};
+
+type PasswordLookupInput = {
+  email?: string;
+};
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -36,6 +47,8 @@ export default {
       if (url.pathname === "/internal/session/revoke") return revokeSession(request, env);
       if (url.pathname === "/internal/confirmation/create") return createConfirmation(request, env);
       if (url.pathname === "/internal/confirmation/consume") return consumeConfirmation(request, env);
+      if (url.pathname === "/internal/password/register") return registerPassword(request, env);
+      if (url.pathname === "/internal/password/get") return getPassword(request, env);
       return Response.json({ error: "Não encontrado." }, { status: 404 });
     } catch (error) {
       console.error("D1 auth store error", error);
@@ -117,6 +130,51 @@ async function consumeConfirmation(request: Request, env: Env): Promise<Response
   const row = await env.DB.prepare("SELECT email FROM confirmation_tokens WHERE token_hash = ?")
     .bind(tokenHash).first<{ email: string }>();
   return row ? Response.json({ email: row.email }) : Response.json({ error: "Token inválido." }, { status: 400 });
+}
+
+async function registerPassword(request: Request, env: Env): Promise<Response> {
+  const input = await request.json<PasswordRegistrationInput>();
+  if (!input.email || !input.hashB64 || !input.saltB64 || !input.iterations)
+    return Response.json({ error: "Dados de senha incompletos." }, { status: 400 });
+  const email = input.email.trim().toLowerCase();
+  const existing = await env.DB.prepare(`SELECT user_id FROM password_credentials
+    WHERE user_id = ?`).bind(await sha256(`user:${email}`)).first<{ user_id: string }>();
+  if (existing)
+    return Response.json({ error: "A conta já possui senha cadastrada." }, { status: 409 });
+
+  const now = new Date().toISOString();
+  const userId = await sha256(`user:${email}`);
+  const role = isOwnerEmail(email) ? "owner" : "user";
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO users (id, email, email_verified, role, created_at, updated_at)
+      VALUES (?, ?, 1, ?, ?, ?)
+      ON CONFLICT(email) DO UPDATE SET email_verified = 1,
+        role = CASE WHEN users.role = 'owner' THEN 'owner' ELSE excluded.role END,
+        updated_at = excluded.updated_at`)
+      .bind(userId, email, role, now, now),
+    env.DB.prepare(`INSERT INTO password_credentials
+      (user_id, hash_b64, salt_b64, iterations, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)`)
+      .bind(userId, input.hashB64, input.saltB64, input.iterations, now, now)
+  ]);
+  return Response.json({ ok: true, email, role });
+}
+
+async function getPassword(request: Request, env: Env): Promise<Response> {
+  const input = await request.json<PasswordLookupInput>();
+  if (!input.email) return Response.json({ error: "E-mail não informado." }, { status: 400 });
+  const email = input.email.trim().toLowerCase();
+  const row = await env.DB.prepare(`SELECT u.email, u.role, p.hash_b64, p.salt_b64, p.iterations
+    FROM password_credentials p JOIN users u ON u.id = p.user_id
+    WHERE u.email = ?`).bind(email)
+    .first<{ email: string; role: "user" | "owner"; hash_b64: string; salt_b64: string; iterations: number }>();
+  if (!row) return Response.json({ error: "Conta ou senha inválida." }, { status: 401 });
+  return Response.json({ email: row.email, role: row.role, hashB64: row.hash_b64, saltB64: row.salt_b64, iterations: row.iterations });
+}
+
+function isOwnerEmail(email: string): boolean {
+  return ["leohighway@gmail.com", "leonardolimabravo@hotmail.com", "omnia051987@gmail.com"]
+    .includes(email.toLowerCase());
 }
 
 async function sha256(value: string): Promise<string> {

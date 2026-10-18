@@ -15,6 +15,29 @@ public sealed class AuthClient
 
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
 
+    public async Task RegisterAsync(string email, string password, CancellationToken cancellationToken = default)
+    {
+        using var response = await Http.PostAsJsonAsync(
+            $"{BaseUrl}/auth/register",
+            new { email, password },
+            cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException(await ReadErrorAsync(response, "O servidor recusou o cadastro."));
+    }
+
+    public async Task<AuthResult> SignInWithPasswordAsync(string email, string password, CancellationToken cancellationToken = default)
+    {
+        using var response = await Http.PostAsJsonAsync(
+            $"{BaseUrl}/auth/password/login",
+            new { email, password },
+            cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException(await ReadErrorAsync(response, "E-mail ou senha inválidos."));
+        var result = await response.Content.ReadFromJsonAsync<AuthResult>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, cancellationToken);
+        return result ?? throw new InvalidOperationException("Resposta de autenticação vazia.");
+    }
+
     public Task<AuthResult> SignInWithGoogleAsync(CancellationToken cancellationToken = default) =>
         SignInWithProviderAsync("google", cancellationToken);
 
@@ -79,5 +102,17 @@ public sealed class AuthClient
         using var probe = new TcpListener(IPAddress.Loopback, 0);
         probe.Start();
         return ((IPEndPoint)probe.LocalEndpoint).Port;
+    }
+
+    static async Task<string> ReadErrorAsync(HttpResponseMessage response, string fallback)
+    {
+        try
+        {
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            if (json.RootElement.TryGetProperty("error", out var error)) return error.GetString() ?? fallback;
+            if (json.RootElement.TryGetProperty("detail", out var detail)) return detail.GetString() ?? fallback;
+        }
+        catch (JsonException) { }
+        return $"{fallback} ({(int)response.StatusCode}).";
     }
 }
