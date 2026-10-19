@@ -46,6 +46,26 @@ app.Use(async (context, next) =>
 
 app.MapGet("/health", () => Results.Ok(new { service = "omnia-auth", status = "ok", utc = DateTime.UtcNow }));
 
+app.MapGet("/privacy", () => Results.Content("""
+<!doctype html>
+<html lang="pt-BR">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Omnia Metadata — Política de Privacidade</title></head>
+<body style="font-family:Segoe UI,Arial,sans-serif;max-width:820px;margin:40px auto;padding:0 20px;line-height:1.55;color:#1f2937">
+<h1>Política de Privacidade — Omnia Metadata</h1>
+<p><strong>Última atualização:</strong> 19 de outubro de 2026</p>
+<p>O Omnia Metadata é um aplicativo de análise técnica de arquivos. Nesta versão, a análise dos arquivos selecionados ocorre localmente no computador do usuário; o conteúdo dos arquivos não é enviado para os nossos servidores como parte da análise local.</p>
+<h2>Dados tratados</h2>
+<ul><li>Dados de conta, como e-mail e identificador do provedor de login, para autenticação e recuperação do plano;</li><li>Dados técnicos de sessão, segurança, compras e uso de consultas, para manter a conta, aplicar limites e liberar recursos adquiridos;</li><li>Metadados e resultados produzidos localmente pelo aplicativo, sob controle do usuário.</li></ul>
+<h2>Compras</h2>
+<p>Assinaturas e consultas avulsas são processadas pela Microsoft Store. O Omnia Metadata não armazena dados de cartão de pagamento. O plano e os créditos são associados à conta autenticada e podem ser recuperados em outro dispositivo compatível.</p>
+<h2>Compartilhamento e segurança</h2>
+<p>Não vendemos dados pessoais. Dados de autenticação e entitlement são armazenados com medidas técnicas de segurança e usados somente para operar a conta, proteger o serviço e cumprir obrigações legais. O aplicativo pode usar provedores de autenticação escolhidos pelo usuário, como Google.</p>
+<h2>Direitos e contato</h2>
+<p>Para solicitar acesso, correção ou exclusão dos dados da conta, entre em contato pelo e-mail <a href="mailto:omnia051987@gmail.com">omnia051987@gmail.com</a>.</p>
+<p>Ao usar o aplicativo, o usuário reconhece que resultados de metadados, proveniência, edição e IA são indícios técnicos e não constituem prova absoluta.</p>
+</body></html>
+""", "text/html; charset=utf-8"));
+
 app.MapPost("/auth/request-confirmation", () => Results.StatusCode(StatusCodes.Status410Gone))
     .RequireRateLimiting("auth");
 
