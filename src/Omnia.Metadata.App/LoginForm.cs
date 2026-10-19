@@ -14,9 +14,11 @@ public sealed class LoginForm : Form
     readonly TextBox email = new() { PlaceholderText = "E-mail", Dock = DockStyle.Fill };
     readonly TextBox password = new() { PlaceholderText = "Senha", UseSystemPasswordChar = true, Dock = DockStyle.Fill };
     readonly AuthClient auth = new();
+    readonly AuthSessionStore sessionStore;
 
-    public LoginForm()
+    public LoginForm(AuthSessionStore sessionStore)
     {
+        this.sessionStore = sessionStore;
         Text = "Omnia Metadata — Login";
         Width = 520;
         Height = 570;
@@ -140,12 +142,7 @@ public sealed class LoginForm : Form
         try
         {
             var result = await auth.SignInWithPasswordAsync(email.Text.Trim(), password.Text);
-            AuthenticatedEmail = result.Email;
-            SessionToken = result.SessionToken;
-            Role = result.Role;
-            Plan = result.Plan;
-            MonthlyFreeQueriesUsed = result.MonthlyFreeQueriesUsed;
-            OneOffQueriesAvailable = result.OneOffQueriesAvailable;
+            ApplyResult(result);
             DialogResult = DialogResult.OK;
             Close();
         }
@@ -166,12 +163,7 @@ public sealed class LoginForm : Form
         try
         {
             var result = await auth.SignInWithProviderAsync(provider);
-            AuthenticatedEmail = result.Email;
-            SessionToken = result.SessionToken;
-            Role = result.Role;
-            Plan = result.Plan;
-            MonthlyFreeQueriesUsed = result.MonthlyFreeQueriesUsed;
-            OneOffQueriesAvailable = result.OneOffQueriesAvailable;
+            ApplyResult(result);
             DialogResult = DialogResult.OK;
             Close();
         }
@@ -191,5 +183,16 @@ public sealed class LoginForm : Form
                 button.Text = $"Continuar com {displayName}";
             }
         }
+    }
+
+    void ApplyResult(AuthResult result)
+    {
+        AuthenticatedEmail = result.Email;
+        SessionToken = result.SessionToken;
+        Role = result.Role;
+        Plan = result.Plan;
+        MonthlyFreeQueriesUsed = result.MonthlyFreeQueriesUsed;
+        OneOffQueriesAvailable = result.OneOffQueriesAvailable;
+        sessionStore.Save(result);
     }
 }

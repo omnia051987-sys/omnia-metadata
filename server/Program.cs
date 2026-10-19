@@ -90,7 +90,7 @@ app.MapPost("/auth/password/login", async (
     if (credential is null || !VerifyPassword(req.Password, credential))
         return Results.Unauthorized();
 
-    var session = sessions.Create(email, $"password:{email}", credential.Role);
+    var session = sessions.Create(email, $"password:{email}", credential.Role, "password");
     if (!await durable.CreateAsync(session, "password"))
         return Results.Problem("Não foi possível persistir a sessão com segurança.", statusCode: 503);
     var entitlement = await ResolveEntitlementAsync(durable, email, credential.Role);
@@ -245,7 +245,7 @@ app.MapGet("/auth/google/callback", async (
             return Results.BadRequest(new { authenticated = false, error = "O Google não confirmou o e-mail desta conta." });
 
         var role = IsOwnerEmail(email) ? "owner" : "user";
-        var session = sessions.Create(email, subject, role);
+        var session = sessions.Create(email, subject, role, "google");
         if (!await durable.CreateAsync(session, "google"))
             return Results.Problem("Não foi possível persistir a sessão com segurança.", statusCode: 503);
         var entitlement = await ResolveEntitlementAsync(durable, email, role);
@@ -309,6 +309,43 @@ app.MapPost("/auth/desktop/exchange", async (DesktopTicketRequest? req, DesktopT
         purchases = entitlement.Purchases,
         session.ExpiresUtc
     });
+}).RequireRateLimiting("auth");
+
+app.MapPost("/auth/desktop/restore", async (DesktopSessionRequest? req, AuthSessionStore sessions, D1SessionStore durable) =>
+{
+    if (req is null || string.IsNullOrWhiteSpace(req.SessionToken))
+        return Results.BadRequest(new { authenticated = false, error = "Sessao nao informada." });
+
+    if (!sessions.TryGet(req.SessionToken, out var session))
+    {
+        session = await durable.GetAsync(req.SessionToken);
+        if (session is null) return Results.Unauthorized();
+    }
+
+    var entitlement = await ResolveEntitlementAsync(durable, session.Email, session.Role);
+    return Results.Ok(new
+    {
+        authenticated = true,
+        provider = session.Provider,
+        sessionToken = session.Token,
+        session.Email,
+        session.Role,
+        plan = entitlement.Plan,
+        monthlyFreeQueriesUsed = entitlement.MonthlyFreeQueriesUsed,
+        oneOffQueriesAvailable = entitlement.OneOffQueriesAvailable,
+        purchases = entitlement.Purchases,
+        session.ExpiresUtc
+    });
+}).RequireRateLimiting("auth");
+
+app.MapPost("/auth/desktop/revoke", async (DesktopSessionRequest? req, AuthSessionStore sessions, D1SessionStore durable) =>
+{
+    if (req is null || string.IsNullOrWhiteSpace(req.SessionToken))
+        return Results.BadRequest(new { error = "Sessao nao informada." });
+
+    sessions.Revoke(req.SessionToken);
+    await durable.RevokeAsync(req.SessionToken);
+    return Results.NoContent();
 }).RequireRateLimiting("auth");
 
 app.MapGet("/auth/me", async (HttpContext http, AuthSessionStore sessions, D1SessionStore durable) =>
@@ -537,7 +574,7 @@ app.MapGet("/auth/{provider}/callback", async (
             return Results.BadRequest(new { authenticated = false, error = $"O {ProviderDisplayName(provider)} não confirmou um e-mail utilizável." });
 
         var role = IsOwnerEmail(email) ? "owner" : "user";
-        var session = sessions.Create(email, subject, role);
+        var session = sessions.Create(email, subject, role, provider);
         if (!await durable.CreateAsync(session, provider))
             return Results.Problem("Não foi possível persistir a sessão com segurança.", statusCode: 503);
         var entitlement = await ResolveEntitlementAsync(durable, email, role);
@@ -664,6 +701,7 @@ static bool VerifyPassword(string password, PasswordCredentialData credential)
 
 record ConfirmationRequest(string Email);
 record DesktopTicketRequest(string Ticket);
+record DesktopSessionRequest(string SessionToken);
 record PasswordRegistrationRequest(string Email, string Password);
 record PasswordLoginRequest(string Email, string Password);
 sealed record PasswordCredentialData(string HashB64, string SaltB64, int Iterations, string Role);
@@ -722,16 +760,16 @@ sealed class TokenStore
         pending.TryRemove(token, out var value) && value.Expires >= DateTime.UtcNow ? value.Email : null;
 }
 
-sealed record AuthSession(string Token, string Email, string Subject, string Role, DateTime ExpiresUtc);
+sealed record AuthSession(string Token, string Email, string Subject, string Role, DateTime ExpiresUtc, string Provider = "unknown");
 
 sealed class AuthSessionStore
 {
     readonly ConcurrentDictionary<string, AuthSession> sessions = new();
 
-    public AuthSession Create(string email, string subject, string role)
+    public AuthSession Create(string email, string subject, string role, string provider = "unknown")
     {
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        var session = new AuthSession(token, email, subject, role, DateTime.UtcNow.AddHours(8));
+        var session = new AuthSession(token, email, subject, role, DateTime.UtcNow.AddHours(8), provider);
         sessions[token] = session;
         return session;
     }
@@ -817,7 +855,8 @@ sealed class D1SessionStore
                 root.GetProperty("email").GetString()!,
                 string.Empty,
                 root.GetProperty("role").GetString()!,
-                root.GetProperty("expiresUtc").GetDateTime());
+                root.GetProperty("expiresUtc").GetDateTime(),
+                root.TryGetProperty("provider", out var provider) ? provider.GetString() ?? "unknown" : "unknown");
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or FormatException) { return null; }
     }

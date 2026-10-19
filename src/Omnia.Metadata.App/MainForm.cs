@@ -13,17 +13,28 @@ public sealed class MainForm : Form
     readonly string plan;
     readonly int monthlyFreeQueriesUsed;
     readonly int oneOffQueriesAvailable;
+    readonly AuthSessionStore? sessionStore;
+    readonly string sessionToken;
     readonly StoreBillingClient billing = new();
     AnalysisReport? current;
     EntitlementState access;
 
-    public MainForm(string authenticatedEmail, string role, string plan, int monthlyFreeQueriesUsed, int oneOffQueriesAvailable)
+    public MainForm(
+        string authenticatedEmail,
+        string role,
+        string plan,
+        int monthlyFreeQueriesUsed,
+        int oneOffQueriesAvailable,
+        AuthSessionStore? sessionStore = null,
+        string sessionToken = "")
     {
         this.authenticatedEmail = authenticatedEmail;
         this.role = role;
         this.plan = plan;
         this.monthlyFreeQueriesUsed = monthlyFreeQueriesUsed;
         this.oneOffQueriesAvailable = oneOffQueriesAvailable;
+        this.sessionStore = sessionStore;
+        this.sessionToken = sessionToken;
 
         var edition = role.Equals("owner", StringComparison.OrdinalIgnoreCase) || plan.Equals("owner", StringComparison.OrdinalIgnoreCase)
             ? AppEdition.Proprietario
@@ -44,6 +55,7 @@ public sealed class MainForm : Form
         var textAi = ActionButton("Detecção de IA em texto");
         var edit = ActionButton("Detecção de edição de mídia");
         var about = ActionButton("Sobre");
+        var logout = ActionButton("Sair");
         var subscribe = ActionButton("Assinar Pro — US$ 4,99/mês");
         var oneOff = ActionButton("Comprar consulta — US$ 0,99");
 
@@ -53,12 +65,15 @@ public sealed class MainForm : Form
         textAi.Click += (_, _) => ShowTextAi();
         edit.Click += (_, _) => ShowCategory("Edição e processamento", "Detecção de edição de mídia");
         about.Click += (_, _) => ShowAbout();
+        logout.Click += async (_, _) => await Logout(logout);
         subscribe.Click += async (_, _) => await PurchaseSubscription(subscribe);
         oneOff.Click += async (_, _) => await PurchaseOneOff(oneOff);
 
         var accessLabel = new Label { Text = access.QueryMessage, AutoSize = true, Padding = new(8, 7, 0, 0), ForeColor = Color.FromArgb(21, 45, 90) };
         var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 112, Padding = new(8), WrapContents = true, AutoScroll = true };
-        top.Controls.AddRange([open, export, ai, textAi, edit, about, subscribe, oneOff, accessLabel]);
+        top.Controls.AddRange([open, export, ai, textAi, edit, about, subscribe, oneOff]);
+        if (sessionStore is not null) top.Controls.Add(logout);
+        top.Controls.Add(accessLabel);
 
         files.SelectedIndexChanged += (_, _) => { if (files.SelectedItem is string path) _ = Analyze(path, export); };
         var split = new SplitContainer { Dock = DockStyle.Fill, SplitterDistance = 320 };
@@ -72,6 +87,24 @@ public sealed class MainForm : Form
     }
 
     static Button ActionButton(string text) => new() { Text = text, AutoSize = true, Height = 34, FlatStyle = FlatStyle.System, Margin = new(3) };
+
+    async Task Logout(Button button)
+    {
+        button.Enabled = false;
+        try
+        {
+            await new AuthClient().RevokeSessionAsync(sessionToken);
+        }
+        catch
+        {
+            // Local removal still guarantees that this device will not restore the session.
+        }
+        finally
+        {
+            sessionStore?.Clear();
+            Close();
+        }
+    }
 
     internal void LoadFilesForScreenshot(IEnumerable<string> paths)
     {
@@ -164,7 +197,7 @@ public sealed class MainForm : Form
             + Environment.NewLine + Environment.NewLine + "A ausência de indícios não prova autenticidade.";
     }
 
-    void ShowAbout() => MessageBox.Show("Omnia Metadata — Metadados de Arquivos\nVersão: 0.7.2\nEdição: " + access.Edition + "\n\nAnálise local técnica de metadados e integridade.\nA detecção de IA e edição apresenta indícios probabilísticos, não conclusões absolutas.", "Sobre", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    void ShowAbout() => MessageBox.Show("Omnia Metadata — Metadados de Arquivos\nVersão: 0.7.3\nEdição: " + access.Edition + "\n\nAnálise local técnica de metadados e integridade.\nA detecção de IA e edição apresenta indícios probabilísticos, não conclusões absolutas.", "Sobre", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
     void ShowTextAi(string? initialText = null)
     {

@@ -55,6 +55,36 @@ public sealed class AuthClient
         return result ?? throw new InvalidOperationException("Resposta de autenticação vazia.");
     }
 
+    public async Task<AuthResult?> RestoreSessionAsync(StoredAuthSession stored, CancellationToken cancellationToken = default)
+    {
+        if (stored.ExpiresUtc <= DateTime.UtcNow || string.IsNullOrWhiteSpace(stored.SessionToken))
+            return null;
+
+        using var response = await Http.PostAsJsonAsync(
+            $"{BaseUrl}/auth/desktop/restore",
+            new { sessionToken = stored.SessionToken },
+            cancellationToken);
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+            return null;
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException(await ReadErrorAsync(response, "Nao foi possivel restaurar a sessao."));
+
+        var result = await response.Content.ReadFromJsonAsync<AuthResult>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, cancellationToken);
+        return result is null || result.ExpiresUtc <= DateTime.UtcNow ? null : result;
+    }
+
+    public async Task RevokeSessionAsync(string sessionToken, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionToken)) return;
+        using var response = await Http.PostAsJsonAsync(
+            $"{BaseUrl}/auth/desktop/revoke",
+            new { sessionToken },
+            cancellationToken);
+        if (!response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.Unauthorized)
+            throw new InvalidOperationException(await ReadErrorAsync(response, "Nao foi possivel encerrar a sessao."));
+    }
+
     public Task<AuthResult> SignInWithGoogleAsync(CancellationToken cancellationToken = default) =>
         SignInWithProviderAsync("google", cancellationToken);
 
