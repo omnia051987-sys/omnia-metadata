@@ -279,7 +279,7 @@ public sealed class MainForm : Form
             + Environment.NewLine + Environment.NewLine + "A ausência de indícios não prova autenticidade.";
     }
 
-    void ShowAbout() => MessageBox.Show("Omnia Metadata — Metadados de Arquivos\nVersão: 0.7.4\nEdição: " + access.Edition + "\n\nAnálise local técnica de metadados e integridade.\nA detecção de IA e edição apresenta indícios probabilísticos, não conclusões absolutas.", "Sobre", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    void ShowAbout() => MessageBox.Show("Omnia Metadata — Metadados de Arquivos\nVersão: 0.7.5\nEdição: " + access.Edition + "\n\nAnálise local técnica de metadados e integridade.\nA detecção de IA e edição apresenta indícios probabilísticos, não conclusões absolutas.", "Sobre", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
     void ShowTextAi(string? initialText = null)
     {

@@ -12,7 +12,7 @@ $manifest = Join-Path $storeRoot 'Package.appxmanifest'
 $sourceIcon = Join-Path $repoRoot 'assets\omnia-icon.png'
 $publish = Join-Path $repoRoot 'outputs\Omnia.Metadata.App.publish'
 $stage = Join-Path $repoRoot 'outputs\OmniaMetadata.Store'
-$package = Join-Path $repoRoot 'outputs\OmniaMetadata-0.7.4.msix'
+$package = Join-Path $repoRoot 'outputs\OmniaMetadata-0.7.5.msix'
 
 if (-not $AllowPlaceholderIdentity -and (Select-String -LiteralPath $manifest -Pattern 'Publisher="CN=Omnia Metadata"' -Quiet)) {
     throw 'A identidade/publisher ainda é provisória. Substitua pelos valores atribuídos pelo Partner Center ou use -AllowPlaceholderIdentity apenas para validação local.'

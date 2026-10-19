@@ -81,6 +81,18 @@ public sealed class StoreBillingClient
 
         try
         {
+            var catalog = await context.GetStoreProductsAsync(
+                new[] { "Durable", "Consumable", "Subscription" },
+                new[] { storeId });
+
+            if (catalog.ExtendedError is not null)
+                return new(StorePurchaseStatus.NotPurchased, storeId,
+                    $"A Microsoft Store não conseguiu consultar o catálogo da oferta. Tente novamente mais tarde. Detalhes técnicos: {catalog.ExtendedError.Message}");
+
+            if (!catalog.Products.ContainsKey(storeId))
+                return new(StorePurchaseStatus.NotPurchased, storeId,
+                    $"A oferta de {label.ToLowerInvariant()} ainda não está associada ao catálogo publicado do aplicativo na Microsoft Store. Aguarde a publicação do complemento e tente novamente.");
+
             var result = await context.RequestPurchaseAsync(storeId);
             return new(result.Status, storeId, result.Status switch
             {
@@ -94,6 +106,10 @@ public sealed class StoreBillingClient
         }
         catch (Exception ex)
         {
+            if (ex.Message.Contains("PEX-CatalogAvailabilityDataNotFound", StringComparison.OrdinalIgnoreCase))
+                return new(StorePurchaseStatus.NotPurchased, storeId,
+                    $"A oferta de {label.ToLowerInvariant()} ainda não está disponível no catálogo da Microsoft Store. O complemento precisa estar publicado e associado ao aplicativo pai; tente novamente após a atualização do catálogo.");
+
             return new(StorePurchaseStatus.NotPurchased, storeId, $"Não foi possível abrir a compra da Microsoft Store: {ex.Message}");
         }
     }
