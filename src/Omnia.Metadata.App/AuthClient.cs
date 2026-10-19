@@ -25,6 +25,13 @@ public sealed record PurchaseSummary(
     string PurchasedAt,
     string? ExpiresAt);
 
+public sealed record QueryConsumptionResult(
+    bool Allowed,
+    string Source,
+    int MonthlyFreeQueriesUsed,
+    int OneOffQueriesAvailable,
+    string Message);
+
 public sealed class AuthClient
 {
     public static string BaseUrl =>
@@ -83,6 +90,22 @@ public sealed class AuthClient
             cancellationToken);
         if (!response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.Unauthorized)
             throw new InvalidOperationException(await ReadErrorAsync(response, "Nao foi possivel encerrar a sessao."));
+    }
+
+    public async Task<QueryConsumptionResult> ConsumeQueryAsync(string sessionToken, CancellationToken cancellationToken = default)
+    {
+        using var response = await Http.PostAsJsonAsync(
+            $"{BaseUrl}/auth/desktop/consume-query",
+            new { sessionToken },
+            cancellationToken);
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+            throw new InvalidOperationException("A sessão expirou. Faça login novamente.");
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException(await ReadErrorAsync(response, "Não foi possível validar a consulta."));
+
+        var result = await response.Content.ReadFromJsonAsync<QueryConsumptionResult>(
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, cancellationToken);
+        return result ?? throw new InvalidOperationException("Resposta de consumo de consulta vazia.");
     }
 
     public Task<AuthResult> SignInWithGoogleAsync(CancellationToken cancellationToken = default) =>

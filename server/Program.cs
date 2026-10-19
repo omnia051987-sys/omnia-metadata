@@ -348,6 +348,21 @@ app.MapPost("/auth/desktop/revoke", async (DesktopSessionRequest? req, AuthSessi
     return Results.NoContent();
 }).RequireRateLimiting("auth");
 
+app.MapPost("/auth/desktop/consume-query", async (DesktopSessionRequest? req, AuthSessionStore sessions, D1SessionStore durable) =>
+{
+    if (req is null || string.IsNullOrWhiteSpace(req.SessionToken))
+        return Results.BadRequest(new { allowed = false, message = "Sessao nao informada." });
+
+    if (!sessions.TryGet(req.SessionToken, out var session))
+    {
+        session = await durable.GetAsync(req.SessionToken);
+        if (session is null) return Results.Unauthorized();
+    }
+
+    var result = await durable.ConsumeQueryAsync(session.Email, session.Role);
+    return result is null ? Results.Problem("Nao foi possivel validar o limite de consultas.", statusCode: 503) : Results.Ok(result);
+}).RequireRateLimiting("auth");
+
 app.MapGet("/auth/me", async (HttpContext http, AuthSessionStore sessions, D1SessionStore durable) =>
 {
     if (!http.Request.Cookies.TryGetValue("omnia_session", out var token))
@@ -707,6 +722,7 @@ record PasswordLoginRequest(string Email, string Password);
 sealed record PasswordCredentialData(string HashB64, string SaltB64, int Iterations, string Role);
 sealed record PurchaseSummary(string Provider, string PurchaseId, string ProductId, string Status, string PurchasedAt, string? ExpiresAt);
 sealed record EntitlementData(string Plan, int MonthlyFreeQueriesUsed, int OneOffQueriesAvailable, IReadOnlyList<PurchaseSummary> Purchases);
+sealed record QueryConsumptionData(bool Allowed, string Source, int MonthlyFreeQueriesUsed, int OneOffQueriesAvailable, string Message);
 
 enum PasswordRegistrationStatus
 {
@@ -942,6 +958,20 @@ sealed class D1SessionStore
         {
             return null;
         }
+    }
+
+    public async Task<QueryConsumptionData?> ConsumeQueryAsync(string email, string role)
+    {
+        if (!IsEnabled) return null;
+        using var request = NewRequest("/internal/entitlements/consume", new { email, role });
+        try
+        {
+            using var response = await client.SendAsync(request);
+            if (!response.IsSuccessStatusCode) return null;
+            var result = await response.Content.ReadFromJsonAsync<QueryConsumptionData>();
+            return result;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException) { return null; }
     }
 
     public async Task<EntitlementData?> GetEntitlementsAsync(string email)

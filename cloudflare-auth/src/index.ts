@@ -33,6 +33,11 @@ type EntitlementInput = {
   email?: string;
 };
 
+type ConsumeEntitlementInput = {
+  email?: string;
+  role?: "user" | "owner";
+};
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -54,6 +59,7 @@ export default {
       if (url.pathname === "/internal/password/register") return registerPassword(request, env);
       if (url.pathname === "/internal/password/get") return getPassword(request, env);
       if (url.pathname === "/internal/entitlements/get") return getEntitlements(request, env);
+      if (url.pathname === "/internal/entitlements/consume") return consumeEntitlement(request, env);
       return Response.json({ error: "Não encontrado." }, { status: 404 });
     } catch (error) {
       console.error("D1 auth store error", error);
@@ -196,12 +202,13 @@ async function getEntitlements(request: Request, env: Env): Promise<Response> {
   const input = await request.json<EntitlementInput>();
   if (!input.email) return Response.json({ error: "E-mail não informado." }, { status: 400 });
   const email = input.email.trim().toLowerCase();
+  const period = currentPeriod();
   const row = await env.DB.prepare(`SELECT u.id, u.role,
       COALESCE(e.plan, CASE WHEN u.role = 'owner' THEN 'owner' ELSE 'free' END) AS plan,
-      COALESCE(e.monthly_free_queries_used, 0) AS monthly_free_queries_used,
+      CASE WHEN COALESCE(e.monthly_free_queries_period, '') = ? THEN COALESCE(e.monthly_free_queries_used, 0) ELSE 0 END AS monthly_free_queries_used,
       COALESCE(e.one_off_queries_available, 0) AS one_off_queries_available
     FROM users u LEFT JOIN entitlements e ON e.user_id = u.id
-    WHERE u.email = ?`).bind(email)
+    WHERE u.email = ?`).bind(period, email)
     .first<{ id: string; role: "user" | "owner"; plan: "free" | "subscriber" | "owner"; monthly_free_queries_used: number; one_off_queries_available: number }>();
   if (!row) return Response.json({ plan: "free", monthlyFreeQueriesUsed: 0, oneOffQueriesAvailable: 0, purchases: [] });
   const purchases = await env.DB.prepare(`SELECT provider, provider_purchase_id, product_id, status, purchased_at, expires_at
@@ -221,6 +228,49 @@ async function getEntitlements(request: Request, env: Env): Promise<Response> {
       expiresAt: purchase.expires_at
     }))
   });
+}
+
+async function consumeEntitlement(request: Request, env: Env): Promise<Response> {
+  const input = await request.json<ConsumeEntitlementInput>();
+  if (!input.email) return Response.json({ allowed: false, message: "E-mail nao informado." }, { status: 400 });
+
+  const email = input.email.trim().toLowerCase();
+  const period = currentPeriod();
+  const row = await env.DB.prepare(`SELECT u.id, u.role,
+      COALESCE(e.plan, CASE WHEN u.role = 'owner' THEN 'owner' ELSE 'free' END) AS plan,
+      COALESCE(e.monthly_free_queries_used, 0) AS monthly_free_queries_used,
+      COALESCE(e.monthly_free_queries_period, '') AS monthly_free_queries_period,
+      COALESCE(e.one_off_queries_available, 0) AS one_off_queries_available
+    FROM users u LEFT JOIN entitlements e ON e.user_id = u.id
+    WHERE u.email = ?`).bind(email)
+    .first<{ id: string; role: "user" | "owner"; plan: "free" | "subscriber" | "owner"; monthly_free_queries_used: number; monthly_free_queries_period: string; one_off_queries_available: number }>();
+
+  if (!row)
+    return Response.json({ allowed: false, source: "none", monthlyFreeQueriesUsed: 0, oneOffQueriesAvailable: 0, message: "Conta nao encontrada." });
+
+  if (row.role === "owner" || row.plan === "owner" || row.plan === "subscriber")
+    return Response.json({ allowed: true, source: "included", monthlyFreeQueriesUsed: row.monthly_free_queries_used, oneOffQueriesAvailable: row.one_off_queries_available, message: "Consulta incluida no plano." });
+
+  const freeUpdate = await env.DB.prepare(`UPDATE entitlements
+    SET monthly_free_queries_used = 1, monthly_free_queries_period = ?, updated_at = ?
+    WHERE user_id = ? AND plan = 'free'
+      AND (monthly_free_queries_period <> ? OR monthly_free_queries_used < 1)`)
+    .bind(period, new Date().toISOString(), row.id, period).run();
+  if ((freeUpdate.meta?.changes ?? 0) === 1)
+    return Response.json({ allowed: true, source: "monthly-free", monthlyFreeQueriesUsed: 1, oneOffQueriesAvailable: row.one_off_queries_available, message: "Consulta gratuita mensal consumida." });
+
+  const oneOffUpdate = await env.DB.prepare(`UPDATE entitlements
+    SET one_off_queries_available = one_off_queries_available - 1, updated_at = ?
+    WHERE user_id = ? AND one_off_queries_available > 0`)
+    .bind(new Date().toISOString(), row.id).run();
+  if ((oneOffUpdate.meta?.changes ?? 0) === 1)
+    return Response.json({ allowed: true, source: "one-off", monthlyFreeQueriesUsed: row.monthly_free_queries_used, oneOffQueriesAvailable: row.one_off_queries_available - 1, message: "Consulta avulsa consumida." });
+
+  return Response.json({ allowed: false, source: "none", monthlyFreeQueriesUsed: 1, oneOffQueriesAvailable: 0, message: "Limite gratuito mensal utilizado. Compre uma consulta avulsa ou assine o plano Pro." });
+}
+
+function currentPeriod(): string {
+  return new Date().toISOString().slice(0, 7);
 }
 
 function isOwnerEmail(email: string): boolean {

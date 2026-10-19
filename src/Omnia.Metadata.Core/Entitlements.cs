@@ -7,7 +7,7 @@ public enum AppEdition { Proprietario, Free, Assinante }
 public sealed record EntitlementState(AppEdition Edition, int MonthlyFreeQueriesUsed, int OneOffQueriesAvailable)
 {
     public bool CanViewGps => Edition is AppEdition.Proprietario or AppEdition.Assinante;
-    public bool CanAnalyze => Edition == AppEdition.Proprietario || MonthlyFreeQueriesUsed < 1 || OneOffQueriesAvailable > 0;
+    public bool CanAnalyze => Edition is AppEdition.Proprietario or AppEdition.Assinante || MonthlyFreeQueriesUsed < 1 || OneOffQueriesAvailable > 0;
     public string QueryMessage => Edition == AppEdition.Proprietario ? "Consultas ilimitadas (Proprietário)." : MonthlyFreeQueriesUsed < 1 ? "Consulta gratuita mensal disponível." : "Consulta gratuita utilizada. Consulta avulsa: US$ 1,00.";
 }
 

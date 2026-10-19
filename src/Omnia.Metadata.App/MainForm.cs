@@ -15,7 +15,9 @@ public sealed class MainForm : Form
     readonly int oneOffQueriesAvailable;
     readonly AuthSessionStore? sessionStore;
     readonly string sessionToken;
-    readonly StoreBillingClient billing = new();
+    readonly StoreBillingClient billing;
+    readonly Label accessLabel = new() { AutoSize = true, Padding = new(8, 7, 0, 0), ForeColor = Color.FromArgb(21, 45, 90) };
+    readonly SemaphoreSlim queryGate = new(1, 1);
     AnalysisReport? current;
     EntitlementState access;
 
@@ -35,6 +37,7 @@ public sealed class MainForm : Form
         this.oneOffQueriesAvailable = oneOffQueriesAvailable;
         this.sessionStore = sessionStore;
         this.sessionToken = sessionToken;
+        billing = new StoreBillingClient(this);
 
         var edition = role.Equals("owner", StringComparison.OrdinalIgnoreCase) || plan.Equals("owner", StringComparison.OrdinalIgnoreCase)
             ? AppEdition.Proprietario
@@ -69,7 +72,7 @@ public sealed class MainForm : Form
         subscribe.Click += async (_, _) => await PurchaseSubscription(subscribe);
         oneOff.Click += async (_, _) => await PurchaseOneOff(oneOff);
 
-        var accessLabel = new Label { Text = access.QueryMessage, AutoSize = true, Padding = new(8, 7, 0, 0), ForeColor = Color.FromArgb(21, 45, 90) };
+        accessLabel.Text = access.QueryMessage;
         var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 112, Padding = new(8), WrapContents = true, AutoScroll = true };
         top.Controls.AddRange([open, export, ai, textAi, edit, about, subscribe, oneOff]);
         if (sessionStore is not null) top.Controls.Add(logout);
@@ -83,7 +86,11 @@ public sealed class MainForm : Form
         Controls.Add(top);
 
         report.Text = $"Usuário autenticado: {authenticatedEmail}\n\nPlano: {edition}\n\nSelecione um arquivo para iniciar a análise local.\n\nNenhum arquivo é enviado para a nuvem nesta versão.";
-        Load += async (_, _) => await RefreshStoreEntitlement(accessLabel);
+        Load += async (_, _) =>
+        {
+            await RefreshStoreEntitlement();
+            await RefreshOneOffBalance();
+        };
     }
 
     static Button ActionButton(string text) => new() { Text = text, AutoSize = true, Height = 34, FlatStyle = FlatStyle.System, Margin = new(3) };
@@ -114,7 +121,7 @@ public sealed class MainForm : Form
 
     internal void ShowTextAiForScreenshot(string text) => ShowTextAi(text);
 
-    async Task RefreshStoreEntitlement(Label accessLabel)
+    async Task RefreshStoreEntitlement()
     {
         if (access.Edition == AppEdition.Proprietario) return;
         var subscription = await billing.HasActiveSubscriptionAsync();
@@ -124,6 +131,15 @@ public sealed class MainForm : Form
             accessLabel.Text = "Assinatura Microsoft Store ativa — GPS liberado.";
             Text = $"Omnia Metadata — Assinante — {authenticatedEmail}";
         }
+    }
+
+    async Task RefreshOneOffBalance()
+    {
+        if (access.Edition is AppEdition.Proprietario or AppEdition.Assinante) return;
+        var balance = await billing.GetOneOffBalanceAsync();
+        if (balance > access.OneOffQueriesAvailable)
+            access = new EntitlementState(AppEdition.Free, access.MonthlyFreeQueriesUsed, balance);
+        accessLabel.Text = access.QueryMessage;
     }
 
     async Task PurchaseSubscription(Button button)
@@ -145,7 +161,10 @@ public sealed class MainForm : Form
             MessageBox.Show(result.Message + "\n\nA cobrança é processada exclusivamente pela Microsoft Store; o Omnia Metadata não armazena dados de cartão.", "Microsoft Store", MessageBoxButtons.OK,
                 result.Status is StorePurchaseStatus.Succeeded or StorePurchaseStatus.AlreadyPurchased ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
             if (result.Status is StorePurchaseStatus.Succeeded or StorePurchaseStatus.AlreadyPurchased)
-                await RefreshStoreEntitlement(new Label());
+            {
+                await RefreshStoreEntitlement();
+                await RefreshOneOffBalance();
+            }
         }
         finally { button.Enabled = true; }
     }
@@ -160,11 +179,74 @@ public sealed class MainForm : Form
 
     async Task Analyze(string path, Button export)
     {
+        await queryGate.WaitAsync();
+        try
+        {
+            if (!access.CanAnalyze)
+            {
+                report.Text = "Consulta bloqueada: o limite gratuito mensal já foi utilizado. Compre uma consulta avulsa ou assine o plano Pro.";
+                export.Enabled = false;
+                return;
+            }
+
+            await AnalyzeLocal(path, export);
+            if (current is null) return;
+
+            var consumed = await ConsumeForAnalysisAsync();
+            if (!consumed.Allowed)
+            {
+                current = null;
+                report.Text = consumed.Message;
+                export.Enabled = false;
+                return;
+            }
+
+            accessLabel.Text = access.QueryMessage;
+            current = current with { Fields = ReportAccessFilter.Apply(current.Fields, access) };
+            report.Text = ReportExporter.ToText(current);
+        }
+        catch (Exception ex)
+        {
+            report.Text = "Não foi possível concluir a consulta.\n\n" + ex.Message;
+            export.Enabled = false;
+        }
+        finally
+        {
+            queryGate.Release();
+        }
+    }
+
+    async Task<QueryConsumptionResult> ConsumeForAnalysisAsync()
+    {
+        if (access.Edition is AppEdition.Proprietario or AppEdition.Assinante)
+            return new(true, "included", access.MonthlyFreeQueriesUsed, access.OneOffQueriesAvailable, "Consulta incluída no plano.");
+
+        if (access.MonthlyFreeQueriesUsed < 1)
+        {
+            var result = await new AuthClient().ConsumeQueryAsync(sessionToken);
+            if (result.Allowed)
+                access = new EntitlementState(AppEdition.Free, result.MonthlyFreeQueriesUsed, result.OneOffQueriesAvailable);
+            return result;
+        }
+
+        if (access.OneOffQueriesAvailable > 0 && await billing.ConsumeOneOffAsync())
+        {
+            access = new EntitlementState(AppEdition.Free, access.MonthlyFreeQueriesUsed, access.OneOffQueriesAvailable - 1);
+            return new(true, "oneoff", access.MonthlyFreeQueriesUsed, access.OneOffQueriesAvailable, "Consulta avulsa consumida.");
+        }
+
+        var serverResult = await new AuthClient().ConsumeQueryAsync(sessionToken);
+        if (serverResult.Allowed)
+            access = new EntitlementState(AppEdition.Free, serverResult.MonthlyFreeQueriesUsed, serverResult.OneOffQueriesAvailable);
+        return serverResult;
+    }
+
+    async Task AnalyzeLocal(string path, Button export)
+    {
         try
         {
             report.Text = "Analisando localmente…";
             current = await analyzer.AnalyzeAsync(path);
-            current = current with { Fields = ReportAccessFilter.Apply(current.Fields, access) };
             report.Text = ReportExporter.ToText(current);
             export.Enabled = true;
         }
