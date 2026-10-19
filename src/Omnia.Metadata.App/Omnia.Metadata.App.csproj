@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><ApplicationIcon>..\..\assets\omnia-icon.ico</ApplicationIcon>
+    <OutputType>WinExe</OutputType><TargetFramework>net10.0-windows10.0.19041.0</TargetFramework><UseWindowsForms>true</UseWindowsForms><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><ApplicationIcon>..\..\assets\omnia-icon.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="..\Omnia.Metadata.Core\Omnia.Metadata.Core.csproj" /></ItemGroup>
   <ItemGroup><None Include="..\..\assets\omnia-icon.ico" Link="omnia-icon.ico" /></ItemGroup>

@@ -12,7 +12,7 @@ $manifest = Join-Path $storeRoot 'Package.appxmanifest'
 $sourceIcon = Join-Path $repoRoot 'assets\omnia-icon.png'
 $publish = Join-Path $repoRoot 'outputs\Omnia.Metadata.App.publish'
 $stage = Join-Path $repoRoot 'outputs\OmniaMetadata.Store'
-$package = Join-Path $repoRoot 'outputs\OmniaMetadata-0.7.1.msix'
+$package = Join-Path $repoRoot 'outputs\OmniaMetadata-0.7.2.msix'
 
 if (-not $AllowPlaceholderIdentity -and (Select-String -LiteralPath $manifest -Pattern 'Publisher="CN=Omnia Metadata"' -Quiet)) {
     throw 'A identidade/publisher ainda é provisória. Substitua pelos valores atribuídos pelo Partner Center ou use -AllowPlaceholderIdentity apenas para validação local.'
@@ -34,10 +34,15 @@ foreach ($asset in @('StoreLogo.png', 'Square44x44Logo.png', 'Square150x150Logo.
 
 $makeAppx = Get-Command makeappx.exe -ErrorAction SilentlyContinue
 if ($null -eq $makeAppx) {
+    $makeAppx = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe', 'C:\Program Files\Windows Kits\10\bin\*\x64\makeappx.exe' -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending | Select-Object -First 1
+}
+if ($null -eq $makeAppx) {
     throw 'makeappx.exe não foi encontrado. Instale o Windows SDK ou use o ambiente de empacotamento do Visual Studio para gerar o MSIX.'
 }
 
 if (Test-Path -LiteralPath $package) { Remove-Item -LiteralPath $package -Force }
-& $makeAppx.Source pack /d $stage /p $package /o
+$makeAppxPath = if ($makeAppx.PSObject.Properties.Name -contains 'Source' -and $makeAppx.Source) { $makeAppx.Source } else { $makeAppx.FullName }
+& $makeAppxPath pack /d $stage /p $package /o
 if ($LASTEXITCODE -ne 0) { throw "makeappx.exe terminou com código $LASTEXITCODE." }
 Write-Host "MSIX criado em $package"
