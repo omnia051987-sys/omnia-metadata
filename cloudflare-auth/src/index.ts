@@ -157,6 +157,7 @@ async function registerPassword(request: Request, env: Env): Promise<Response> {
   const now = new Date().toISOString();
   const userId = await sha256(`user:${email}`);
   const role = isOwnerEmail(email) ? "owner" : "user";
+  const plan = role === "owner" ? "owner" : "free";
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO users (id, email, email_verified, role, created_at, updated_at)
       VALUES (?, ?, 1, ?, ?, ?)
@@ -174,7 +175,7 @@ async function registerPassword(request: Request, env: Env): Promise<Response> {
       ON CONFLICT(user_id) DO UPDATE SET
         plan = CASE WHEN entitlements.plan = 'owner' OR excluded.plan = 'owner' THEN 'owner' ELSE entitlements.plan END,
         updated_at = excluded.updated_at`)
-      .bind(userId, role, now)
+      .bind(userId, plan, now)
   ]);
   return Response.json({ ok: true, email, role });
 }
